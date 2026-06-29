@@ -5,6 +5,31 @@ import math
 import unicodedata
 
 
+def _generate_elo_bo5_lookup(max_diff=1000):
+    lookup = [0] * (max_diff + 1)
+    for diff in range(max_diff + 1):
+        p_bo3 = 1.0 / (1.0 + 10 ** ((-diff) / 400.0))
+        low, high = 0.0, 1.0
+        for _ in range(35):
+            p = (low + high) / 2.0
+            if (3 * p**2 - 2 * p**3) < p_bo3:
+                low = p
+            else:
+                high = p
+        p_bo5 = 10 * p**3 - 15 * p**4 + 6 * p**5
+        if p_bo5 >= 1.0:
+            adjusted_diff = max_diff * 1.5
+        elif p_bo5 <= 0.0:
+            adjusted_diff = 0
+        else:
+            adjusted_diff = -400 * math.log10(1.0 / p_bo5 - 1.0)
+        lookup[diff] = round(adjusted_diff)
+    return lookup
+
+_MAX_ELO_DIFF = 1000
+_ELO_BO5_LOOKUP = _generate_elo_bo5_lookup(_MAX_ELO_DIFF)
+
+
 def _normalize(name):
     """Lowercase, strip accents, collapse punctuation to spaces."""
     nfkd = unicodedata.normalize("NFKD", name)
@@ -85,6 +110,7 @@ class ComprehensiveFantasyOptimizer:
         lineups_path=None,
         k_factor=0,
         lineup_size=None,
+        bo5=False,
     ):
         self.costs_path = costs_path
         self.draw_path = draw_path
@@ -105,6 +131,7 @@ class ComprehensiveFantasyOptimizer:
         self.lineups_path = lineups_path
         self.k_factor = k_factor
         self.lineup_size = lineup_size
+        self.bo5 = bo5
         self._gender_max_rounds = {}
         self.players = {}
 
@@ -306,6 +333,13 @@ class ComprehensiveFantasyOptimizer:
             return 1.0
         if elo_a == 0.0:
             return 0.0
+        if self.bo5:
+            raw_diff = elo_a - elo_b
+            abs_diff = min(abs(round(raw_diff)), _MAX_ELO_DIFF)
+            adjusted_diff = _ELO_BO5_LOOKUP[abs_diff]
+            if raw_diff < 0:
+                adjusted_diff = -adjusted_diff
+            return 1.0 / (1.0 + 10 ** (-adjusted_diff / 400.0))
         return 1 / (1 + math.pow(10, (elo_b - elo_a) / 400))
 
     def _bracket_opponent_lines(self, line, size=128):
@@ -1592,6 +1626,8 @@ if __name__ == "__main__":
                         help="CSV/text file of preset lineups to evaluate (one per line, comma-separated player names); skips optimization")
     parser.add_argument("--k-factor", dest="k_factor", type=float, default=0, metavar="K",
                         help="Elo K-factor for live updates during simulation (0 = disabled, try 32–64)")
+    parser.add_argument("--bo5", dest="bo5", action="store_true",
+                        help="Adjust win probabilities for best-of-five matches (default: best-of-three)")
     args = parser.parse_args()
 
     if not args.update_elo and not args.draw_path:
@@ -1619,6 +1655,7 @@ if __name__ == "__main__":
             lineups_path=args.lineups_path,
             k_factor=args.k_factor,
             lineup_size=args.lineup_size,
+            bo5=args.bo5,
         )
         optimizer.load_data()
 
