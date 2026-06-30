@@ -111,6 +111,7 @@ class ComprehensiveFantasyOptimizer:
         k_factor=0,
         lineup_size=None,
         bo5=False,
+        advancements=None,
     ):
         self.costs_path = costs_path
         self.draw_path = draw_path
@@ -132,6 +133,7 @@ class ComprehensiveFantasyOptimizer:
         self.k_factor = k_factor
         self.lineup_size = lineup_size
         self.bo5 = bo5
+        self.advancements = advancements or {}
         self._gender_max_rounds = {}
         self.players = {}
 
@@ -141,6 +143,23 @@ class ComprehensiveFantasyOptimizer:
         elif line <= q * 2: return 2
         elif line <= q * 3: return 3
         else: return 4
+
+    def _label_to_round(self, label, max_rounds):
+        """Convert a round label to the last forced-win round index (1-based).
+        "QF" means the player is guaranteed to *reach* the QF — forced to win all rounds before it."""
+        label = label.upper()
+        if label in ("W", "WIN", "WINNER"):
+            return max_rounds              # forced to win every round including the Final
+        if label == "F":
+            return max(1, max_rounds - 1)  # forced through SF, guaranteed to reach Final
+        if label == "SF":
+            return max(1, max_rounds - 2)  # forced through QF, guaranteed to reach SF
+        if label == "QF":
+            return max(1, max_rounds - 3)  # forced through R16, guaranteed to reach QF
+        if label.startswith("R") and label[1:].isdigit():
+            size = int(label[1:])
+            return max_rounds - int(math.log2(size))  # forced through prior round, guaranteed to reach Rn
+        raise ValueError(f"Unknown round label '{label}'. Use R128/R64/R32/R16/QF/SF/F/W.")
 
     def _round_label(self, rnd, max_rounds):
         """Label for the rnd-th match played in a max_rounds-round draw.
@@ -326,14 +345,18 @@ class ComprehensiveFantasyOptimizer:
             (p["gender"], p["line"]): p
             for p in self.players.values()
         }
+        self._line_to_name = {
+            (pd["gender"], pd["line"]): name
+            for name, pd in self.players.items()
+        }
         self._section_cache = {}
 
-    def calculate_match_win_prob(self, elo_a, elo_b):
+    def calculate_match_win_prob(self, elo_a, elo_b, gender=None):
         if elo_b == 0.0:
             return 1.0
         if elo_a == 0.0:
             return 0.0
-        if self.bo5:
+        if self.bo5 and gender == "M":
             raw_diff = elo_a - elo_b
             abs_diff = min(abs(round(raw_diff)), _MAX_ELO_DIFF)
             adjusted_diff = _ELO_BO5_LOOKUP[abs_diff]
@@ -361,11 +384,12 @@ class ComprehensiveFantasyOptimizer:
             s *= 2
         return tuple(sections)
 
-    def _section_win_probs(self, lines, gender):
+    def _section_win_probs(self, lines, gender, first_round=1):
         """Return {line: P(that player wins the section)} for all known players
         in `lines`, using recursive bracket simulation.  The section must be a
-        power-of-two-sized contiguous block; unknown lines are ignored."""
-        key = (gender, lines[0], lines[-1])
+        power-of-two-sized contiguous block; unknown lines are ignored.
+        first_round is the 1-based round number of the first match in this section."""
+        key = (gender, lines[0], lines[-1], first_round)
         if key in self._section_cache:
             return self._section_cache[key]
         known = [l for l in lines if (gender, l) in self._line_index]
@@ -381,10 +405,19 @@ class ComprehensiveFantasyOptimizer:
             a_known = (gender, a) in self._line_index
             b_known = (gender, b) in self._line_index
             if a_known and b_known:
-                elo_a = self._line_index[(gender, a)]["elo"]
-                elo_b = self._line_index[(gender, b)]["elo"]
-                p = self.calculate_match_win_prob(elo_a, elo_b)
-                result = {a: p, b: 1 - p}
+                adv_a = self.advancements.get(self._line_to_name.get((gender, a)))
+                adv_b = self.advancements.get(self._line_to_name.get((gender, b)))
+                force_a = adv_a is not None and first_round <= adv_a
+                force_b = adv_b is not None and first_round <= adv_b
+                if force_a and not force_b:
+                    result = {a: 1.0, b: 0.0}
+                elif force_b and not force_a:
+                    result = {a: 0.0, b: 1.0}
+                else:
+                    elo_a = self._line_index[(gender, a)]["elo"]
+                    elo_b = self._line_index[(gender, b)]["elo"]
+                    p = self.calculate_match_win_prob(elo_a, elo_b, gender)
+                    result = {a: p, b: 1 - p}
             elif a_known:
                 result = {a: 1.0}
             else:
@@ -394,31 +427,49 @@ class ComprehensiveFantasyOptimizer:
 
         mid = len(lines) // 2
         left, right = lines[:mid], lines[mid:]
-        left_probs  = self._section_win_probs(left, gender)
-        right_probs = self._section_win_probs(right, gender)
+        section_rounds = int(math.log2(len(lines)))
+        left_probs  = self._section_win_probs(left, gender, first_round)
+        right_probs = self._section_win_probs(right, gender, first_round)
+        cross_round = first_round + section_rounds - 1
 
         result = {}
         for l, p_l in left_probs.items():
             elo_l = self._line_index[(gender, l)]["elo"]
+            adv_l = self.advancements.get(self._line_to_name.get((gender, l)))
+            force_l = adv_l is not None and cross_round <= adv_l
             for r, p_r in right_probs.items():
                 elo_r = self._line_index[(gender, r)]["elo"]
-                p_lr = self.calculate_match_win_prob(elo_l, elo_r)
+                adv_r = self.advancements.get(self._line_to_name.get((gender, r)))
+                force_r = adv_r is not None and cross_round <= adv_r
+                if force_l and not force_r:
+                    p_lr = 1.0
+                elif force_r and not force_l:
+                    p_lr = 0.0
+                else:
+                    p_lr = self.calculate_match_win_prob(elo_l, elo_r, gender)
                 result[l] = result.get(l, 0) + p_l * p_r * p_lr
                 result[r] = result.get(r, 0) + p_l * p_r * (1 - p_lr)
         self._section_cache[key] = result
         return result
 
-    def _expected_win_prob(self, player_elo, lines, gender, fallback_elo):
+    def _expected_win_prob(self, player_elo, lines, gender, fallback_elo, first_round=1, facing_round=None):
         """Σ P(j wins section) × P(player beats j).
-        Correct form: averages win probabilities over the opponent distribution
-        rather than plugging E[elo] into the nonlinear sigmoid."""
-        probs = self._section_win_probs(lines, gender)
+        facing_round is the round at which the player actually meets the section winner;
+        if an opponent has a forced advance covering that round, win prob against them is 0."""
+        if facing_round is None:
+            facing_round = first_round
+        probs = self._section_win_probs(lines, gender, first_round)
         if not probs:
-            return self.calculate_match_win_prob(player_elo, fallback_elo)
-        return sum(
-            p_j * self.calculate_match_win_prob(player_elo, self._line_index[(gender, j)]["elo"])
-            for j, p_j in probs.items()
-        )
+            return self.calculate_match_win_prob(player_elo, fallback_elo, gender)
+        total = 0.0
+        for j, p_j in probs.items():
+            adv_j = self.advancements.get(self._line_to_name.get((gender, j)))
+            if adv_j is not None and facing_round <= adv_j:
+                p_win = 0.0
+            else:
+                p_win = self.calculate_match_win_prob(player_elo, self._line_index[(gender, j)]["elo"], gender)
+            total += p_j * p_win
+        return total
 
     def compute_ev(self, player_name):
         """Simulate a player's path through the bracket using actual draw opponents
@@ -444,8 +495,14 @@ class ComprehensiveFantasyOptimizer:
         ewp = self._expected_win_prob
         p_reach = 1.0
         all_p = []
+        advance_through = self.advancements.get(player_name)
         for i, opp_lines in enumerate(opp_sections):
-            p_reach = p_reach * ewp(p_elo, opp_lines, gender, fb[i])
+            rnd = i + 1  # 1-based
+            if advance_through is not None and rnd <= advance_through:
+                win_p = 1.0
+            else:
+                win_p = ewp(p_elo, opp_lines, gender, fb[i], first_round=1, facing_round=rnd)
+            p_reach = p_reach * win_p
             all_p.append(round(p_reach, 4))
 
         min_idx = max(0, max_rounds - self.scoring_rounds - 1)
@@ -546,12 +603,44 @@ class ComprehensiveFantasyOptimizer:
         lines.append(sep)
         return lines
 
+    def _max_lineup_score(self, lineup):
+        """Max points this lineup can score, accounting for players knocking each other out.
+
+        For each round r, at most one lineup member per size-2^r bracket section can
+        achieve r wins. So max achievers at round r = # sections of size 2^r with ≥1
+        lineup member. Sum over all scoring rounds."""
+        total = 0
+        for gender in ("M", "F"):
+            gender_members = [n for n in lineup if self.players[n]["gender"] == gender]
+            if not gender_members:
+                continue
+            max_rounds = self._max_rounds(gender)
+            size = 2 ** max_rounds
+            min_r = max_rounds - self.scoring_rounds
+            lines = [self.players[n]["line"] for n in gender_members]
+            for r in range(1, max_rounds + 1):
+                if r < min_r:
+                    continue
+                section_size = 2 ** r
+                sections_hit = {(ln - 1) // section_size for ln in lines}
+                total += 2 * len(sections_hit)
+        return total
+
     def _print_lineup(self, title, note, player_evs, best_lineup):
         elo_label = {"elo": "Elo", "gelo": "gElo", "celo": "cElo", "helo": "hElo"}.get(self.elo_col, self.elo_col)
         gross_ev = round(sum(player_evs[p]["ev"] for p in best_lineup), 3)
         tokens = sum(self.players[p]["cost"] for p in best_lineup)
         portfolio_var = self._lineup_variance(best_lineup, player_evs)
         portfolio_std = math.sqrt(max(portfolio_var, 0))
+
+        # P(lineup contains winner) per gender — sum of p_ch (mutually exclusive events)
+        winner_probs = {}
+        for p in best_lineup:
+            g = self.players[p]["gender"]
+            winner_probs[g] = winner_probs.get(g, 0.0) + player_evs[p]["p_ch"]
+        p_any_winner = 1.0 - math.prod(1.0 - v for v in winner_probs.values())
+        max_score = self._max_lineup_score(best_lineup)
+        winner_str = f"P(winner): {self._pct(p_any_winner)}%  |  Max: {max_score}"
 
         if self.discord:
             rows = []
@@ -569,14 +658,15 @@ class ComprehensiveFantasyOptimizer:
             print(f"**{title}**")
             if note:
                 print(f"_{note}_")
-            print(f"EV: {gross_ev:.2f}  |  StdDev: {portfolio_std:.2f}  |  Tokens: {tokens}/{self.token_cap}")
+            print(f"EV: {gross_ev:.2f}  |  StdDev: {portfolio_std:.2f}  |  Tokens: {tokens}/{self.token_cap}  |  {winner_str}")
             print("```")
             print("\n".join(lines))
             print("```")
         else:
             print(f"**Total Portfolio EV:** {gross_ev:.2f} Points")
             print(f"**Portfolio StdDev:** {portfolio_std:.2f} Points")
-            print(f"**Total Capital Spent:** {tokens} / {self.token_cap} Tokens\n")
+            print(f"**Total Capital Spent:** {tokens} / {self.token_cap} Tokens")
+            print(f"**{winner_str}**\n")
             print(f"| Selected Athlete | Gender | Cost | {elo_label} | QF% | SF% | F% | W% | EV | EV/Token | StdDev | Bracket Quadrant |")
             print("| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |")
             for p in best_lineup:
@@ -602,6 +692,8 @@ class ComprehensiveFantasyOptimizer:
         }
 
         n_players = len(survivors)
+        max_rounds = self._max_rounds(gender)
+        current_round = max_rounds - int(math.log2(n_players)) + 1
         while n_players > 1:
             next_survivors = {}
             lines = sorted(survivors)
@@ -610,7 +702,19 @@ class ComprehensiveFantasyOptimizer:
                 na, nb = survivors[la], survivors[lb]
                 elo_a = live_elos[na] if live_elos else self.players[na]["elo"]
                 elo_b = live_elos[nb] if live_elos else self.players[nb]["elo"]
-                if elo_a == 0.0:
+                adv_a = self.advancements.get(na)
+                adv_b = self.advancements.get(nb)
+                force_a = adv_a is not None and current_round <= adv_a
+                force_b = adv_b is not None and current_round <= adv_b
+                if force_a and not force_b:
+                    winner_line, winner, loser = la, na, nb
+                    rounds_won[winner] += 1
+                    next_survivors[winner_line] = winner
+                elif force_b and not force_a:
+                    winner_line, winner, loser = lb, nb, na
+                    rounds_won[winner] += 1
+                    next_survivors[winner_line] = winner
+                elif elo_a == 0.0:
                     next_survivors[lb] = nb
                     if nb in rounds_won:
                         rounds_won[nb] += 1
@@ -619,7 +723,7 @@ class ComprehensiveFantasyOptimizer:
                     if na in rounds_won:
                         rounds_won[na] += 1
                 else:
-                    p = self.calculate_match_win_prob(elo_a, elo_b)
+                    p = self.calculate_match_win_prob(elo_a, elo_b, gender)
                     if rng.random() < p:
                         winner_line, winner, loser, p_win = la, na, nb, p
                     else:
@@ -632,6 +736,7 @@ class ComprehensiveFantasyOptimizer:
                         live_elos[loser]  += k * (0 - p_win)
             survivors = next_survivors
             n_players = len(survivors)
+            current_round += 1
 
         return rounds_won
 
@@ -1175,14 +1280,20 @@ class ComprehensiveFantasyOptimizer:
             pool_scores = self.run_simulations(pool, n_simulations)
             print()
 
-            BEST_AT_THRESHOLDS = [2, 4, 6, 8, 10, 12, 14, 16, 18]
             n_trials = len(pool_scores[0])
 
-            # Find winner index per threshold
+            # Build thresholds dynamically: keep adding until best P(≥k) drops below 5%
+            BEST_AT_THRESHOLDS = []
             threshold_winners = {}
-            for k in BEST_AT_THRESHOLDS:
+            k = 2
+            while True:
                 ge_vals = [sum(1 for s in scores if s >= k) / n_trials * 100 for scores in pool_scores]
-                threshold_winners[k] = max(range(len(ge_vals)), key=lambda i: ge_vals[i])
+                best_idx = max(range(len(ge_vals)), key=lambda i: ge_vals[i])
+                threshold_winners[k] = best_idx
+                BEST_AT_THRESHOLDS.append(k)
+                if ge_vals[best_idx] < 5.0:
+                    break
+                k += 2
 
             # Best floor: lineup with highest (mean - stddev)
             def sim_floor(scores):
@@ -1359,24 +1470,40 @@ class ComprehensiveFantasyOptimizer:
         # scoring begins at round (1-indexed) = max_rounds - scoring_rounds + 1
         scoring_start = max_rounds - self.scoring_rounds  # 0-based index; rnd > scoring_start → scores
         round_defs = [
-            (self._round_label(rnd, max_rounds), opp_sections[rnd - 1], fb[rnd - 1],
+            (rnd, self._round_label(rnd, max_rounds), opp_sections[rnd - 1], fb[rnd - 1],
              rnd > scoring_start)
             for rnd in range(1, max_rounds + 1)
         ]
         # Champion "W" row — no opponent section, win_p = 1.0
-        round_defs.append(("W", [], None, (max_rounds + 1) > scoring_start))
+        round_defs.append((max_rounds + 1, "W", [], None, (max_rounds + 1) > scoring_start))
+
+        advance_through = self.advancements.get(player_name)
 
         # Cumulative reach probability, updated each round
         p_reach = 1.0
         rows = []
 
-        for rnd_name, opp_lines, fallback, scores_at in round_defs:
+        for rnd, rnd_name, opp_lines, fallback, scores_at in round_defs:
             if rnd_name == "W":
                 win_p = 1.0
                 opp_str = "—"
                 is_bye = False
+            elif advance_through is not None and rnd <= advance_through:
+                win_p = 1.0
+                probs = self._section_win_probs(opp_lines, gender, first_round=1)
+                real_probs = {j: p_j for j, p_j in probs.items()
+                              if self._line_index[(gender, j)]["elo"] > 0.0}
+                if not real_probs:
+                    continue
+                top = sorted(real_probs.items(), key=lambda x: -x[1])[:3]
+                opp_parts = []
+                for j, p_j in top:
+                    opp_name = self._line_to_name.get((gender, j), f"line {j}")
+                    opp_elo = self._line_index[(gender, j)]["elo"]
+                    opp_parts.append(f"{opp_name} ({round(opp_elo)}, {self._pct(p_j)}%)")
+                opp_str = " / ".join(opp_parts) + "  [forced]"
             else:
-                probs = self._section_win_probs(opp_lines, gender)
+                probs = self._section_win_probs(opp_lines, gender, first_round=1)
 
                 if probs:
                     # Bye: all opponents in the section are BYE sentinels (elo 0.0)
@@ -1387,22 +1514,24 @@ class ComprehensiveFantasyOptimizer:
                         continue
                     is_bye = False
                     top = sorted(real_probs.items(), key=lambda x: -x[1])[:3]
-                    win_p = sum(
-                        p_j * self.calculate_match_win_prob(p_elo, self._line_index[(gender, j)]["elo"])
-                        for j, p_j in probs.items()
-                    )
+                    win_p_parts = []
+                    for j, p_j in probs.items():
+                        adv_j = self.advancements.get(self._line_to_name.get((gender, j)))
+                        if adv_j is not None and rnd <= adv_j:
+                            pw = 0.0
+                        else:
+                            pw = self.calculate_match_win_prob(p_elo, self._line_index[(gender, j)]["elo"], gender)
+                        win_p_parts.append(p_j * pw)
+                    win_p = sum(win_p_parts)
                     opp_parts = []
                     for j, p_j in top:
-                        opp_name = next(
-                            (n for n, pd in self.players.items() if pd["gender"] == gender and pd["line"] == j),
-                            f"line {j}"
-                        )
+                        opp_name = self._line_to_name.get((gender, j), f"line {j}")
                         opp_elo = self._line_index[(gender, j)]["elo"]
                         opp_parts.append(f"{opp_name} ({round(opp_elo)}, {self._pct(p_j)}%)")
                     opp_str = " / ".join(opp_parts)
                 else:
                     is_bye = False
-                    win_p = self.calculate_match_win_prob(p_elo, fallback)
+                    win_p = self.calculate_match_win_prob(p_elo, fallback, gender)
                     opp_str = f"unknown (fallback {elo_label} {round(fallback)})"
 
             p_reach_next = p_reach * win_p
@@ -1628,6 +1757,10 @@ if __name__ == "__main__":
                         help="Elo K-factor for live updates during simulation (0 = disabled, try 32–64)")
     parser.add_argument("--bo5", dest="bo5", action="store_true",
                         help="Adjust win probabilities for best-of-five matches (default: best-of-three)")
+    parser.add_argument("--advancements", dest="advancements_raw", default=None, metavar="PLAYER:ROUND,...",
+                        help="Force players to win through a given round, e.g. \"Djokovic:QF,Sinner:F\"")
+    parser.add_argument("--boost", dest="boost_raw", default=None, metavar="PLAYER:AMT,...",
+                        help="Comma-separated Elo boosts, e.g. \"Sinner:50,Djokovic:-25\"")
     args = parser.parse_args()
 
     if not args.update_elo and not args.draw_path:
@@ -1658,6 +1791,46 @@ if __name__ == "__main__":
             bo5=args.bo5,
         )
         optimizer.load_data()
+
+        if args.advancements_raw:
+            advancements = {}
+            for entry in args.advancements_raw.split(","):
+                entry = entry.strip()
+                if not entry:
+                    continue
+                if ":" not in entry:
+                    print(f"ERROR: --advancements entry '{entry}' must be in Player:Round format")
+                    continue
+                raw_name, _, raw_round = entry.rpartition(":")
+                try:
+                    resolved = _resolve_player(raw_name.strip(), optimizer.players)
+                    gender = optimizer.players[resolved]["gender"]
+                    max_rounds = optimizer._max_rounds(gender)
+                    rnd = optimizer._label_to_round(raw_round.strip(), max_rounds)
+                    advancements[resolved] = rnd
+                    print(f"Advancing {resolved} through {raw_round.strip().upper()} (round {rnd})", flush=True)
+                except ValueError as e:
+                    print(f"ERROR: {e}")
+            optimizer.advancements = advancements
+            optimizer._section_cache.clear()
+
+        if args.boost_raw:
+            for entry in args.boost_raw.split(","):
+                entry = entry.strip()
+                if not entry:
+                    continue
+                if ":" not in entry:
+                    print(f"ERROR: --boost entry '{entry}' must be in Player:amount format")
+                    continue
+                raw_name, _, raw_amt = entry.rpartition(":")
+                try:
+                    resolved = _resolve_player(raw_name.strip(), optimizer.players)
+                    amt = float(raw_amt.strip())
+                    optimizer.players[resolved]["elo"] += amt
+                    optimizer._section_cache.clear()
+                    print(f"Boosting {resolved} by {amt:+.0f} → {optimizer.players[resolved]['elo']:.0f}", flush=True)
+                except ValueError as e:
+                    print(f"ERROR: {e}")
 
         if args.exclude_raw:
             excluded = set()
