@@ -112,6 +112,7 @@ class ComprehensiveFantasyOptimizer:
         lineup_size=None,
         bo5=False,
         advancements=None,
+        draw_efficiency=False,
     ):
         self.costs_path = costs_path
         self.draw_path = draw_path
@@ -134,6 +135,7 @@ class ComprehensiveFantasyOptimizer:
         self.lineup_size = lineup_size
         self.bo5 = bo5
         self.advancements = advancements or {}
+        self.draw_efficiency = draw_efficiency
         self._gender_max_rounds = {}
         self.players = {}
 
@@ -516,6 +518,51 @@ class ComprehensiveFantasyOptimizer:
             "all_probs": all_p,
         }
 
+    def compute_draw_efficiency(self, player_name, player_evs):
+        """EV / neutral_EV. > 1.0 = favorable draw, < 1.0 = tough draw.
+        neutral_EV uses the field-average opponent Elo at each round, weighted
+        by each other player's probability of surviving to that round."""
+        p_data = self.players[player_name]
+        gender = p_data["gender"]
+        p_elo = p_data["elo"]
+        max_rounds = self._max_rounds(gender)
+
+        real_others = [
+            n for n, pd in self.players.items()
+            if pd["gender"] == gender
+            and not n.startswith("__BYE_")
+            and n != player_name
+            and pd["elo"] > 0
+        ]
+
+        p_reach = 1.0
+        neutral_all_p = []
+        for r in range(1, max_rounds + 1):
+            weights, elos = [], []
+            for j in real_others:
+                if j not in player_evs:
+                    continue
+                j_probs = player_evs[j]["all_probs"]
+                p_j_here = 1.0 if r == 1 else j_probs[r - 2]
+                if p_j_here > 0:
+                    weights.append(p_j_here)
+                    elos.append(self.players[j]["elo"])
+            if weights:
+                total_w = sum(weights)
+                neutral_opp_elo = sum(w * e for w, e in zip(weights, elos)) / total_w
+                win_p = self.calculate_match_win_prob(p_elo, neutral_opp_elo, gender)
+            else:
+                win_p = 0.5
+            p_reach *= win_p
+            neutral_all_p.append(p_reach)
+
+        min_idx = max(0, max_rounds - self.scoring_rounds - 1)
+        neutral_ev = 2 * sum(neutral_all_p[min_idx:])
+        actual_ev = player_evs[player_name]["ev"]
+        if neutral_ev == 0:
+            return None, None
+        return actual_ev / neutral_ev, neutral_ev
+
     def _meeting_block_size(self, name_a, name_b):
         """Smallest power-of-2 block containing both players' lines (same gender only)."""
         la = self.players[name_a]["line"]
@@ -577,7 +624,7 @@ class ComprehensiveFantasyOptimizer:
     def _fmt(pd, s):
         """Return consistently formatted display values for a player."""
         _pct = ComprehensiveFantasyOptimizer._pct
-        return {
+        d = {
             "elo":      str(round(pd["elo"])),
             "p_qf":     _pct(s['p_qf']),
             "p_sf":     _pct(s['p_sf']),
@@ -586,6 +633,11 @@ class ComprehensiveFantasyOptimizer:
             "ev":       f"{s['ev']:.2f}",
             "ev_tok":   f"{s['ev']/pd['cost']:.2f}",
         }
+        if s.get("draw_eff") is not None:
+            d["draw_eff"] = f"{s['draw_eff']:.2f}"
+        else:
+            d["draw_eff"] = "—"
+        return d
 
     @staticmethod
     def _fixed_table(headers, rows):
@@ -651,9 +703,9 @@ class ComprehensiveFantasyOptimizer:
                 indiv_std = math.sqrt(max(self._score_variance(p, player_evs), 0))
                 rows.append([p, pd["gender"], pd["cost"], f["elo"],
                               f["p_qf"], f["p_sf"], f["p_f"], f["p_ch"],
-                              f["ev"], f["ev_tok"], f"{indiv_std:.2f}", f"Q{pd['quadrant']}"])
+                              f["ev"], f["ev_tok"], f"{indiv_std:.2f}", f"Q{pd['quadrant']}", f["draw_eff"]])
             headers = ["Player", "G", "Cost", elo_label,
-                       "QF%", "SF%", "F%", "W%", "EV", "EV/Tok", "StdDev", "Quad"]
+                       "QF%", "SF%", "F%", "W%", "EV", "EV/Tok", "StdDev", "Quad", "DrawEff"]
             lines = self._fixed_table(headers, rows)
             print(f"**{title}**")
             if note:
@@ -667,8 +719,8 @@ class ComprehensiveFantasyOptimizer:
             print(f"**Portfolio StdDev:** {portfolio_std:.2f} Points")
             print(f"**Total Capital Spent:** {tokens} / {self.token_cap} Tokens")
             print(f"**{winner_str}**\n")
-            print(f"| Selected Athlete | Gender | Cost | {elo_label} | QF% | SF% | F% | W% | EV | EV/Token | StdDev | Bracket Quadrant |")
-            print("| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |")
+            print(f"| Selected Athlete | Gender | Cost | {elo_label} | QF% | SF% | F% | W% | EV | EV/Token | StdDev | Bracket Quadrant | DrawEff |")
+            print("| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |")
             for p in best_lineup:
                 pd = self.players[p]
                 s = player_evs[p]
@@ -676,7 +728,7 @@ class ComprehensiveFantasyOptimizer:
                 indiv_std = math.sqrt(max(self._score_variance(p, player_evs), 0))
                 print(f"| **{p}** | {pd['gender']} | {pd['cost']} | {f['elo']} "
                       f"| {f['p_qf']} | {f['p_sf']} | {f['p_f']} | {f['p_ch']} "
-                      f"| {f['ev']} | {f['ev_tok']} | {indiv_std:.2f} | Quarter {pd['quadrant']} |")
+                      f"| {f['ev']} | {f['ev_tok']} | {indiv_std:.2f} | Quarter {pd['quadrant']} | {f['draw_eff']} |")
 
     def _simulate_tournament(self, gender, rng, live_elos=None):
         """Simulate one full gender draw. Returns {player_name: rounds_won} for all players.
@@ -1417,8 +1469,8 @@ class ComprehensiveFantasyOptimizer:
                 evtok = f["ev_tok"] + "*" if name in top_evtok_names else f["ev_tok"]
                 rows.append([name, pd["cost"], f["elo"],
                               f["p_qf"], f["p_sf"], f["p_f"], f["p_ch"],
-                              f["ev"], evtok])
-            headers = ["Player", "Cost", elo_label, "QF%", "SF%", "F%", "W%", "EV", "EV/Tok"]
+                              f["ev"], evtok, f["draw_eff"]])
+            headers = ["Player", "Cost", elo_label, "QF%", "SF%", "F%", "W%", "EV", "EV/Tok", "DrawEff"]
             lines = self._fixed_table(headers, rows)
             if title:
                 print(f"**{title}**")
@@ -1428,8 +1480,8 @@ class ComprehensiveFantasyOptimizer:
         else:
             if title:
                 print(f"### {title}\n")
-            print(f"| Player | Cost | {elo_label} | QF% | SF% | F% | W% | EV | EV/Token |")
-            print("| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |")
+            print(f"| Player | Cost | {elo_label} | QF% | SF% | F% | W% | EV | EV/Token | DrawEff |")
+            print("| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |")
             for name in names:
                 pd = self.players[name]
                 s = player_evs[name]
@@ -1437,7 +1489,7 @@ class ComprehensiveFantasyOptimizer:
                 evtok = f["ev_tok"] + "*" if name in top_evtok_names else f["ev_tok"]
                 print(f"| **{name}** | {pd['cost']} | {f['elo']} "
                       f"| {f['p_qf']} | {f['p_sf']} | {f['p_f']} | {f['p_ch']} "
-                      f"| {f['ev']} | {evtok} |")
+                      f"| {f['ev']} | {evtok} | {f['draw_eff']} |")
             print()
 
     def print_path(self, player_name):
@@ -1562,10 +1614,55 @@ class ComprehensiveFantasyOptimizer:
                 print("| " + " | ".join(str(c) for c in row) + " |")
             print()
 
+    def _print_draw_efficiency(self, player_evs, elo_label):
+        """Print all priced players sorted by draw efficiency descending."""
+        priced = [
+            n for n, pd in self.players.items()
+            if pd["is_priced"] and player_evs[n].get("draw_eff") is not None
+        ]
+        priced.sort(key=lambda n: player_evs[n]["draw_eff"], reverse=True)
+
+        if self.discord:
+            rows = []
+            for name in priced:
+                pd = self.players[name]
+                s = player_evs[name]
+                f = self._fmt(pd, s)
+                neutral_ev = s.get("neutral_ev")
+                n_ev_str = f"{neutral_ev:.2f}" if neutral_ev is not None else "—"
+                n_evtok_str = f"{neutral_ev/pd['cost']:.2f}" if neutral_ev is not None else "—"
+                rows.append([name, pd["gender"], pd["cost"], f["elo"],
+                              n_ev_str, f["ev"], n_evtok_str, f["ev_tok"], f["draw_eff"]])
+            headers = ["Player", "G", "Cost", elo_label, "NeutralEV", "EV", "Neut/Tok", "EV/Tok", "DrawEff"]
+            print("**DRAW EFFICIENCY**")
+            print("```")
+            print("\n".join(self._fixed_table(headers, rows)))
+            print("```")
+        else:
+            print("## DRAW EFFICIENCY\n")
+            print(f"| Player | G | Cost | {elo_label} | NeutralEV | EV | Neut/Token | EV/Token | DrawEff |")
+            print("| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |")
+            for name in priced:
+                pd = self.players[name]
+                s = player_evs[name]
+                f = self._fmt(pd, s)
+                neutral_ev = s.get("neutral_ev")
+                n_ev_str = f"{neutral_ev:.2f}" if neutral_ev is not None else "—"
+                n_evtok_str = f"{neutral_ev/pd['cost']:.2f}" if neutral_ev is not None else "—"
+                print(f"| **{name}** | {pd['gender']} | {pd['cost']} | {f['elo']} "
+                      f"| {n_ev_str} | {f['ev']} | {n_evtok_str} | {f['ev_tok']} | {f['draw_eff']} |")
+            print()
+
     def run_optimization(self):
         if not self.players:
             self.load_data()
         player_evs = {name: self.compute_ev(name) for name in self.players}
+        for name in player_evs:
+            if not self.players[name].get("is_priced") or self.players[name]["elo"] == 0:
+                continue
+            draw_eff, neutral_ev = self.compute_draw_efficiency(name, player_evs)
+            player_evs[name]["draw_eff"] = draw_eff
+            player_evs[name]["neutral_ev"] = neutral_ev
         elo_label = {"elo": "Elo", "gelo": "gElo", "celo": "cElo", "helo": "hElo"}.get(self.elo_col, self.elo_col)
 
         if self.discord:
@@ -1581,6 +1678,10 @@ class ComprehensiveFantasyOptimizer:
             self._print_pool_section("Women", "F", player_evs, elo_label, top_evtok)
         else:
             self._print_pool_section(None, next(iter(genders_present)), player_evs, elo_label, top_evtok)
+
+        if self.draw_efficiency:
+            print("\n---\n")
+            self._print_draw_efficiency(player_evs, elo_label)
 
         print("\n---\n")
 
@@ -1757,6 +1858,8 @@ if __name__ == "__main__":
                         help="Elo K-factor for live updates during simulation (0 = disabled, try 32–64)")
     parser.add_argument("--bo5", dest="bo5", action="store_true",
                         help="Adjust win probabilities for best-of-five matches (default: best-of-three)")
+    parser.add_argument("--draw-efficiency", dest="draw_efficiency", action="store_true",
+                        help="Print a table of all players sorted by draw efficiency (actual EV / expected EV for their Elo)")
     parser.add_argument("--advancements", dest="advancements_raw", default=None, metavar="PLAYER:ROUND,...",
                         help="Force players to win through a given round, e.g. \"Djokovic:QF,Sinner:F\"")
     parser.add_argument("--boost", dest="boost_raw", default=None, metavar="PLAYER:AMT,...",
@@ -1789,6 +1892,7 @@ if __name__ == "__main__":
             k_factor=args.k_factor,
             lineup_size=args.lineup_size,
             bo5=args.bo5,
+            draw_efficiency=args.draw_efficiency,
         )
         optimizer.load_data()
 
