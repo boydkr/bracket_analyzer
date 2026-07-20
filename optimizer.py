@@ -77,13 +77,21 @@ def max_lineup_score(data, lineup, model: ScoringModel):
     return total
 
 
-def find_top_lineups(data, player_evs, n, excluded, included, token_cap, lineup_size, ev_floor):
+def find_top_lineups(data, player_evs, n, excluded, included, token_cap, lineup_size, ev_floor,
+                     objective=None):
     """Return (top_lineups, evaluated, ev_histogram) using branch-and-bound DFS.
 
-    top_lineups: list of (ev, tuple_of_names), best first
-    evaluated: list of (ev, tuple_of_names), sorted ascending (full search space)
+    top_lineups: list of (score, tuple_of_names), best first
+    evaluated: list of (score, tuple_of_names), sorted ascending (full search space)
     ev_histogram: {buckets, percentiles, min, max, n} — orchestrator prints this
+
+    objective: Callable[[lineup, player_evs], float] — ranks lineups. Defaults to gross EV sum.
+    The branch-and-bound upper bound uses individual gross EVs, so objective must be
+    monotone in individual player EVs (adding a higher-EV player never decreases the score).
     """
+    if objective is None:
+        objective = lambda lineup, evs: sum(evs[p]["ev"] for p in lineup)
+
     candidates = sorted(
         [p for p in data.players if data.players[p]["is_priced"] and p not in excluded],
         key=lambda x: player_evs[x]["ev"], reverse=True,
@@ -124,16 +132,16 @@ def find_top_lineups(data, player_evs, n, excluded, included, token_cap, lineup_
 
             if size >= min_size:
                 full_combo = tuple(forced) + tuple(combo)
-                total_ev = forced_ev + ev
-                evaluated.append((total_ev, full_combo))
+                score = objective(full_combo, player_evs)
+                evaluated.append((score, full_combo))
                 cur_nth = nth_best()
-                if total_ev > cur_nth:
+                if score > cur_nth:
                     if len(results) < n:
-                        results.append((total_ev, full_combo))
+                        results.append((score, full_combo))
                         if len(results) == n:
                             results.sort(key=lambda x: -x[0])
                     else:
-                        results[-1] = (total_ev, full_combo)
+                        results[-1] = (score, full_combo)
                         results.sort(key=lambda x: -x[0])
 
             if size == max_size:
