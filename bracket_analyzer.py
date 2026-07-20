@@ -23,6 +23,12 @@ from bracket import (
     compute_ev as _compute_ev_fn,
     compute_draw_efficiency as _compute_draw_efficiency_fn,
 )
+from simulator import (
+    simulate_tournament as _simulate_tournament_fn,
+    score_lineup_from_sim as _score_lineup_from_sim_fn,
+    cap_sim_pool as _cap_sim_pool_fn,
+    run_simulations as _run_simulations_fn,
+)
 
 
 
@@ -243,118 +249,18 @@ class ComprehensiveFantasyOptimizer:
                       f"| {f['ev']} | {f['ev_tok']} | {indiv_std:.2f} | Quarter {pd['quadrant']} | {f['draw_eff']} |")
 
     def _simulate_tournament(self, gender, rng, live_elos=None):
-        """Simulate one full gender draw. Returns {player_name: rounds_won} for all players.
-        live_elos, if provided, is a mutable {name: elo} dict updated each match (K-factor mode)."""
-        survivors = {
-            pd["line"]: name
-            for name, pd in self.players.items()
-            if pd["gender"] == gender
-        }
-        rounds_won = {
-            name: 0 for name, pd in self.players.items()
-            if pd["gender"] == gender and not name.startswith("__BYE_")
-        }
-
-        n_players = len(survivors)
-        max_rounds = self._max_rounds(gender)
-        current_round = max_rounds - int(math.log2(n_players)) + 1
-        while n_players > 1:
-            next_survivors = {}
-            lines = sorted(survivors)
-            for i in range(0, len(lines), 2):
-                la, lb = lines[i], lines[i + 1]
-                na, nb = survivors[la], survivors[lb]
-                elo_a = live_elos[na] if live_elos else self.players[na]["elo"]
-                elo_b = live_elos[nb] if live_elos else self.players[nb]["elo"]
-                adv_a = self.advancements.get(na)
-                adv_b = self.advancements.get(nb)
-                force_a = adv_a is not None and current_round <= adv_a
-                force_b = adv_b is not None and current_round <= adv_b
-                if force_a and not force_b:
-                    winner_line, winner, loser = la, na, nb
-                    rounds_won[winner] += 1
-                    next_survivors[winner_line] = winner
-                elif force_b and not force_a:
-                    winner_line, winner, loser = lb, nb, na
-                    rounds_won[winner] += 1
-                    next_survivors[winner_line] = winner
-                elif elo_a == 0.0:
-                    next_survivors[lb] = nb
-                    if nb in rounds_won:
-                        rounds_won[nb] += 1
-                elif elo_b == 0.0:
-                    next_survivors[la] = na
-                    if na in rounds_won:
-                        rounds_won[na] += 1
-                else:
-                    p = self._win_prob(elo_a, elo_b, gender)
-                    if rng.random() < p:
-                        winner_line, winner, loser, p_win = la, na, nb, p
-                    else:
-                        winner_line, winner, loser, p_win = lb, nb, na, 1 - p
-                    rounds_won[winner] += 1
-                    next_survivors[winner_line] = winner
-                    if live_elos is not None:
-                        k = self.k_factor
-                        live_elos[winner] += k * (1 - p_win)
-                        live_elos[loser]  += k * (0 - p_win)
-            survivors = next_survivors
-            n_players = len(survivors)
-            current_round += 1
-
-        return rounds_won
+        return _simulate_tournament_fn(self._data, gender, rng, self.advancements, self.bo5,
+                                       self.k_factor, live_elos)
 
     def _score_lineup_from_sim(self, lineup, rounds_won):
-        """Score a lineup against one simulated tournament result.
-        2 pts each for reaching the final scoring_rounds rounds."""
-        score = 0
-        for name in lineup:
-            r = rounds_won.get(name, 0)
-            gender = self.players[name]["gender"]
-            max_rounds = self._max_rounds(gender)
-            min_r = max_rounds - self.scoring_rounds
-            for threshold in range(min_r, max_rounds + 1):
-                if r >= threshold:
-                    score += 2
-        return score
-
-    _SIM_CALL_CAP = 10_000_000
+        return _score_lineup_from_sim_fn(self._data, lineup, rounds_won, self.scoring_rounds)
 
     def _cap_sim_pool(self, pool, n_trials, label=""):
-        cap = max(1, self._SIM_CALL_CAP // n_trials)
-        if len(pool) > cap:
-            print(
-                f"WARNING: {label}{len(pool):,} lineups × {n_trials:,} trials = "
-                f"{len(pool)*n_trials:,} calls — capping to top {cap:,} by EV "
-                f"(>{len(pool)-cap:,} dropped).",
-                flush=True,
-            )
-            pool = pool[-cap:]  # pool is sorted ascending, tail = highest EV
-        return pool
+        return _cap_sim_pool_fn(pool, n_trials, label)
 
     def run_simulations(self, lineups, n_trials=10000):
-        """Run n_trials full-draw simulations. Returns {lineup_index: sorted score list}."""
-        import random
-        rng = random.Random()
-        scores = [[] for _ in lineups]
-        use_live_elos = self.k_factor != 0
-        base_elos = {name: pd["elo"] for name, pd in self.players.items()} if use_live_elos else None
-
-        for _ in range(n_trials):
-            if use_live_elos:
-                live_elos = dict(base_elos)
-                m_result = self._simulate_tournament("M", rng, live_elos)
-                f_result = self._simulate_tournament("F", rng, live_elos)
-            else:
-                m_result = self._simulate_tournament("M", rng)
-                f_result = self._simulate_tournament("F", rng)
-            combined = {**m_result, **f_result}
-            for i, (_, lineup) in enumerate(lineups):
-                scores[i].append(self._score_lineup_from_sim(lineup, combined))
-
-        for s in scores:
-            s.sort()
-        return scores
+        return _run_simulations_fn(self._data, lineups, n_trials, self.advancements,
+                                   self.bo5, self.k_factor, self.scoring_rounds)
 
     def _find_top_lineups(self, player_evs, n):
         """Return the top-n distinct lineups by gross EV using branch-and-bound DFS."""
