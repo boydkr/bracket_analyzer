@@ -12,6 +12,7 @@ from name_matching import (
 )
 from elo_math import calculate_match_win_prob
 from elo_fetcher import update_elo_files
+from formatting import pct as _pct, fmt_player as _fmt_player, fixed_table as _fixed_table
 
 
 
@@ -525,52 +526,6 @@ class ComprehensiveFantasyOptimizer:
         return var
 
 
-    @staticmethod
-    def _pct(v):
-        """Format a probability (0–1) as a percentage string.
-        <1%: 2 decimal places, no leading zero (.04); <10%: 1 decimal (8.2); else integer (62)."""
-        p = v * 100
-        if p < 1:
-            return f"{p:.2f}".lstrip("0")
-        elif p < 10:
-            return f"{p:.1f}"
-        else:
-            return f"{p:.0f}"
-
-    @staticmethod
-    def _fmt(pd, s):
-        """Return consistently formatted display values for a player."""
-        _pct = ComprehensiveFantasyOptimizer._pct
-        d = {
-            "elo":      str(round(pd["elo"])),
-            "p_qf":     _pct(s['p_qf']),
-            "p_sf":     _pct(s['p_sf']),
-            "p_f":      _pct(s['p_f']),
-            "p_ch":     _pct(s['p_ch']),
-            "ev":       f"{s['ev']:.2f}",
-            "ev_tok":   f"{s['ev']/pd['cost']:.2f}",
-        }
-        if s.get("draw_eff") is not None:
-            d["draw_eff"] = f"{s['draw_eff']:.2f}"
-        else:
-            d["draw_eff"] = "—"
-        return d
-
-    @staticmethod
-    def _fixed_table(headers, rows):
-        """Return a list of lines for a fixed-width plain-text table."""
-        widths = [len(h) for h in headers]
-        for row in rows:
-            for i, cell in enumerate(row):
-                widths[i] = max(widths[i], len(str(cell)))
-        sep = "+" + "+".join("-" * (w + 2) for w in widths) + "+"
-        def fmt_row(cells):
-            return "|" + "|".join(f" {str(c):<{widths[i]}} " for i, c in enumerate(cells)) + "|"
-        lines = [sep, fmt_row(headers), sep]
-        for row in rows:
-            lines.append(fmt_row(row))
-        lines.append(sep)
-        return lines
 
     def _max_lineup_score(self, lineup):
         """Max points this lineup can score, accounting for players knocking each other out.
@@ -609,21 +564,21 @@ class ComprehensiveFantasyOptimizer:
             winner_probs[g] = winner_probs.get(g, 0.0) + player_evs[p]["p_ch"]
         p_any_winner = 1.0 - math.prod(1.0 - v for v in winner_probs.values())
         max_score = self._max_lineup_score(best_lineup)
-        winner_str = f"P(winner): {self._pct(p_any_winner)}%  |  Max: {max_score}"
+        winner_str = f"P(winner): {_pct(p_any_winner)}%  |  Max: {max_score}"
 
         if self.discord:
             rows = []
             for p in best_lineup:
                 pd = self.players[p]
                 s = player_evs[p]
-                f = self._fmt(pd, s)
+                f = _fmt_player(pd, s, self.elo_col)
                 indiv_std = math.sqrt(max(self._score_variance(p, player_evs), 0))
                 rows.append([p, pd["gender"], pd["cost"], f["elo"],
                               f["p_qf"], f["p_sf"], f["p_f"], f["p_ch"],
                               f["ev"], f["ev_tok"], f"{indiv_std:.2f}", f"Q{pd['quadrant']}", f["draw_eff"]])
             headers = ["Player", "G", "Cost", elo_label,
                        "QF%", "SF%", "F%", "W%", "EV", "EV/Tok", "StdDev", "Quad", "DrawEff"]
-            lines = self._fixed_table(headers, rows)
+            lines = _fixed_table(headers, rows)
             print(f"**{title}**")
             if note:
                 print(f"_{note}_")
@@ -641,7 +596,7 @@ class ComprehensiveFantasyOptimizer:
             for p in best_lineup:
                 pd = self.players[p]
                 s = player_evs[p]
-                f = self._fmt(pd, s)
+                f = _fmt_player(pd, s, self.elo_col)
                 indiv_std = math.sqrt(max(self._score_variance(p, player_evs), 0))
                 print(f"| **{p}** | {pd['gender']} | {pd['cost']} | {f['elo']} "
                       f"| {f['p_qf']} | {f['p_sf']} | {f['p_f']} | {f['p_ch']} "
@@ -912,7 +867,7 @@ class ComprehensiveFantasyOptimizer:
         if self.discord:
             print("**Analytical vs Simulated**")
             print("```")
-            print("\n".join(self._fixed_table(headers, rows)))
+            print("\n".join(_fixed_table(headers, rows)))
             print("```")
         else:
             print("**Analytical vs Simulated**\n")
@@ -970,11 +925,11 @@ class ComprehensiveFantasyOptimizer:
         if self.discord:
             print("**Score Distribution  P(score = k)**")
             print("```")
-            print("\n".join(self._fixed_table(headers, p_rows)))
+            print("\n".join(_fixed_table(headers, p_rows)))
             print("```")
             print("**Exceedance  P(score ≥ k)**")
             print("```")
-            print("\n".join(self._fixed_table(headers, ge_rows)))
+            print("\n".join(_fixed_table(headers, ge_rows)))
             print("```")
         else:
             print("### Score Distribution  P(score = k)\n")
@@ -1031,12 +986,12 @@ class ComprehensiveFantasyOptimizer:
         if self.discord:
             print("**Player Frequency**")
             print("```")
-            print("\n".join(self._fixed_table(["Player", "Count", "Freq%"], freq_rows)))
+            print("\n".join(_fixed_table(["Player", "Count", "Freq%"], freq_rows)))
             print("```")
             if pair_rows:
                 print("**Pairs (lift = observed / expected)**")
                 print("```")
-                print("\n".join(self._fixed_table(["Pair", "Count", "Lift"], pair_rows)))
+                print("\n".join(_fixed_table(["Pair", "Count", "Lift"], pair_rows)))
                 print("```")
         else:
             print("**Player Frequency**\n")
@@ -1083,7 +1038,7 @@ class ComprehensiveFantasyOptimizer:
         if self.discord:
             print(f"\n**Best single pick by P(score ≥ k)**")
             print("```")
-            print("\n".join(self._fixed_table(headers, rows)))
+            print("\n".join(_fixed_table(headers, rows)))
             print("```")
         else:
             print(f"\n### Best single pick by P(score ≥ k)\n")
@@ -1141,12 +1096,12 @@ class ComprehensiveFantasyOptimizer:
             label = self._round_label(rnd, max_rounds)
             sim_pct = rounds_reached[rnd - 1] / n_trials
             ana_pct = all_p[rnd - 2] if rnd > 1 else 1.0
-            rows1.append([label, self._pct(sim_pct) + "%", self._pct(ana_pct) + "%",
+            rows1.append([label, _pct(sim_pct) + "%", _pct(ana_pct) + "%",
                           f"{(sim_pct - ana_pct)*100:+.1f}pp"])
         # Champion row
         sim_w = rounds_reached[max_rounds] / n_trials
         ana_w = all_p[max_rounds - 1]
-        rows1.append(["W", self._pct(sim_w) + "%", self._pct(ana_w) + "%",
+        rows1.append(["W", _pct(sim_w) + "%", _pct(ana_w) + "%",
                       f"{(sim_w - ana_w)*100:+.1f}pp"])
 
         headers1 = ["Round", "Sim", "Analytical", "Δ"]
@@ -1174,15 +1129,15 @@ class ComprehensiveFantasyOptimizer:
         if self.discord:
             print("\n**Simulated vs Analytical reach rates**")
             print("```")
-            print("\n".join(self._fixed_table(headers1, rows1)))
+            print("\n".join(_fixed_table(headers1, rows1)))
             print("```")
             print("**Score Distribution  P(score = k)**")
             print("```")
-            print("\n".join(self._fixed_table(headers2, p_rows)))
+            print("\n".join(_fixed_table(headers2, p_rows)))
             print("```")
             print("**Exceedance  P(score ≥ k)**")
             print("```")
-            print("\n".join(self._fixed_table(headers3, ge_rows)))
+            print("\n".join(_fixed_table(headers3, ge_rows)))
             print("```")
         else:
             print("\n### Simulated vs Analytical reach rates\n")
@@ -1336,7 +1291,7 @@ class ComprehensiveFantasyOptimizer:
             if self.discord:
                 print(header_line)
                 print("```")
-                print("\n".join(self._fixed_table(["Score", "P(≥k)", "EV", "Lineup"], rows)))
+                print("\n".join(_fixed_table(["Score", "P(≥k)", "EV", "Lineup"], rows)))
                 print("```")
             else:
                 print(f"{header_line}\n")
@@ -1382,13 +1337,13 @@ class ComprehensiveFantasyOptimizer:
             for name in names:
                 pd = self.players[name]
                 s = player_evs[name]
-                f = self._fmt(pd, s)
+                f = _fmt_player(pd, s, self.elo_col)
                 evtok = f["ev_tok"] + "*" if name in top_evtok_names else f["ev_tok"]
                 rows.append([name, pd["cost"], f["elo"],
                               f["p_qf"], f["p_sf"], f["p_f"], f["p_ch"],
                               f["ev"], evtok, f["draw_eff"]])
             headers = ["Player", "Cost", elo_label, "QF%", "SF%", "F%", "W%", "EV", "EV/Tok", "DrawEff"]
-            lines = self._fixed_table(headers, rows)
+            lines = _fixed_table(headers, rows)
             if title:
                 print(f"**{title}**")
             print("```")
@@ -1402,7 +1357,7 @@ class ComprehensiveFantasyOptimizer:
             for name in names:
                 pd = self.players[name]
                 s = player_evs[name]
-                f = self._fmt(pd, s)
+                f = _fmt_player(pd, s, self.elo_col)
                 evtok = f["ev_tok"] + "*" if name in top_evtok_names else f["ev_tok"]
                 print(f"| **{name}** | {pd['cost']} | {f['elo']} "
                       f"| {f['p_qf']} | {f['p_sf']} | {f['p_f']} | {f['p_ch']} "
@@ -1469,7 +1424,7 @@ class ComprehensiveFantasyOptimizer:
                 for j, p_j in top:
                     opp_name = self._line_to_name.get((gender, j), f"line {j}")
                     opp_elo = self._line_index[(gender, j)]["elo"]
-                    opp_parts.append(f"{opp_name} ({round(opp_elo)}, {self._pct(p_j)}%)")
+                    opp_parts.append(f"{opp_name} ({round(opp_elo)}, {_pct(p_j)}%)")
                 opp_str = " / ".join(opp_parts) + "  [forced]"
             else:
                 probs = self._section_win_probs(opp_lines, gender, first_round=1)
@@ -1496,7 +1451,7 @@ class ComprehensiveFantasyOptimizer:
                     for j, p_j in top:
                         opp_name = self._line_to_name.get((gender, j), f"line {j}")
                         opp_elo = self._line_index[(gender, j)]["elo"]
-                        opp_parts.append(f"{opp_name} ({round(opp_elo)}, {self._pct(p_j)}%)")
+                        opp_parts.append(f"{opp_name} ({round(opp_elo)}, {_pct(p_j)}%)")
                     opp_str = " / ".join(opp_parts)
                 else:
                     is_bye = False
@@ -1509,8 +1464,8 @@ class ComprehensiveFantasyOptimizer:
             rows.append([
                 rnd_name,
                 opp_str,
-                self._pct(win_p) + "%",
-                self._pct(p_reach) + "%",
+                _pct(win_p) + "%",
+                _pct(p_reach) + "%",
                 f"{rnd_pts:.2f}" if rnd_pts > 0 else "—",
             ])
             p_reach = p_reach_next
@@ -1518,7 +1473,7 @@ class ComprehensiveFantasyOptimizer:
         headers = ["Round", "Opponent(s)  (Elo, P(faces you))", "Win%", "P(reach)", "E[pts]"]
 
         if self.discord:
-            lines_out = self._fixed_table(headers, rows)
+            lines_out = _fixed_table(headers, rows)
             print(f"**{header}**")
             print("```")
             print("\n".join(lines_out))
@@ -1544,7 +1499,7 @@ class ComprehensiveFantasyOptimizer:
             for name in priced:
                 pd = self.players[name]
                 s = player_evs[name]
-                f = self._fmt(pd, s)
+                f = _fmt_player(pd, s, self.elo_col)
                 neutral_ev = s.get("neutral_ev")
                 n_ev_str = f"{neutral_ev:.2f}" if neutral_ev is not None else "—"
                 n_evtok_str = f"{neutral_ev/pd['cost']:.2f}" if neutral_ev is not None else "—"
@@ -1553,7 +1508,7 @@ class ComprehensiveFantasyOptimizer:
             headers = ["Player", "G", "Cost", elo_label, "NeutralEV", "EV", "Neut/Tok", "EV/Tok", "DrawEff"]
             print("**DRAW EFFICIENCY**")
             print("```")
-            print("\n".join(self._fixed_table(headers, rows)))
+            print("\n".join(_fixed_table(headers, rows)))
             print("```")
         else:
             print("## DRAW EFFICIENCY\n")
@@ -1562,7 +1517,7 @@ class ComprehensiveFantasyOptimizer:
             for name in priced:
                 pd = self.players[name]
                 s = player_evs[name]
-                f = self._fmt(pd, s)
+                f = _fmt_player(pd, s, self.elo_col)
                 neutral_ev = s.get("neutral_ev")
                 n_ev_str = f"{neutral_ev:.2f}" if neutral_ev is not None else "—"
                 n_evtok_str = f"{neutral_ev/pd['cost']:.2f}" if neutral_ev is not None else "—"
