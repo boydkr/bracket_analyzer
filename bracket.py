@@ -1,6 +1,7 @@
 import math
 
 from elo_math import calculate_match_win_prob
+from scoring import ScoringModel
 
 
 def label_to_round(label, max_rounds):
@@ -141,7 +142,7 @@ def expected_win_prob(data, player_elo, lines, gender, advancements, bo5, fallba
     return total
 
 
-def compute_ev(data, player_name, advancements, bo5, scoring_rounds):
+def compute_ev(data, player_name, advancements, bo5, model: ScoringModel):
     """Simulate a player's path through the bracket using actual draw opponents
     where available, falling back to generic tier Elos otherwise."""
     p_data = data.players[player_name]
@@ -174,8 +175,8 @@ def compute_ev(data, player_name, advancements, bo5, scoring_rounds):
         p_reach = p_reach * win_p
         all_p.append(round(p_reach, 4))
 
-    min_idx = max(0, max_rounds - scoring_rounds - 1)
-    ev = round(2 * sum(all_p[min_idx:]), 3)
+    min_idx = model.prob_start_idx(max_rounds)
+    ev = round(model.points_per_round * sum(all_p[min_idx:]), 3)
     return {
         "p_qf": all_p[-4] if len(all_p) >= 4 else all_p[0],
         "p_sf": all_p[-3] if len(all_p) >= 3 else all_p[0],
@@ -186,7 +187,7 @@ def compute_ev(data, player_name, advancements, bo5, scoring_rounds):
     }
 
 
-def compute_draw_efficiency(data, player_name, player_evs, scoring_rounds, bo5):
+def compute_draw_efficiency(data, player_name, player_evs, model: ScoringModel, bo5):
     """EV / neutral_EV. > 1.0 = favorable draw, < 1.0 = tough draw."""
     p_data = data.players[player_name]
     gender = p_data["gender"]
@@ -222,8 +223,8 @@ def compute_draw_efficiency(data, player_name, player_evs, scoring_rounds, bo5):
         p_reach *= win_p
         neutral_all_p.append(p_reach)
 
-    min_idx = max(0, max_rounds - scoring_rounds - 1)
-    neutral_ev = 2 * sum(neutral_all_p[min_idx:])
+    min_idx = model.prob_start_idx(max_rounds)
+    neutral_ev = model.points_per_round * sum(neutral_all_p[min_idx:])
     actual_ev = player_evs[player_name]["ev"]
     if neutral_ev == 0:
         return None, None

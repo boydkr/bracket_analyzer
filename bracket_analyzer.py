@@ -36,6 +36,7 @@ from optimizer import (
     max_lineup_score as _max_lineup_score_fn,
     find_top_lineups as _find_top_lineups_fn,
 )
+from scoring import ScoringModel
 
 
 
@@ -82,6 +83,7 @@ class ComprehensiveFantasyOptimizer:
         self.ev_floor = ev_floor
         self.best_at = best_at
         self.scoring_rounds = scoring_rounds
+        self._model = ScoringModel.from_final_rounds(scoring_rounds)
         self.lineups_path = lineups_path
         self.k_factor = k_factor
         self.lineup_size = lineup_size
@@ -129,25 +131,25 @@ class ComprehensiveFantasyOptimizer:
                                      self.bo5, fallback_elo, first_round, facing_round)
 
     def compute_ev(self, player_name):
-        return _compute_ev_fn(self._data, player_name, self.advancements, self.bo5, self.scoring_rounds)
+        return _compute_ev_fn(self._data, player_name, self.advancements, self.bo5, self._model)
 
     def compute_draw_efficiency(self, player_name, player_evs):
-        return _compute_draw_efficiency_fn(self._data, player_name, player_evs, self.scoring_rounds, self.bo5)
+        return _compute_draw_efficiency_fn(self._data, player_name, player_evs, self._model, self.bo5)
 
     def _meeting_block_size(self, name_a, name_b):
         return _meeting_block_size_fn(self._data, name_a, name_b)
 
     def _pairwise_cov(self, name_a, name_b, evs):
-        return _pairwise_cov_fn(self._data, name_a, name_b, evs, self.scoring_rounds)
+        return _pairwise_cov_fn(self._data, name_a, name_b, evs, self._model)
 
     def _score_variance(self, name, evs):
-        return _score_variance_fn(self._data, name, evs, self.scoring_rounds)
+        return _score_variance_fn(self._data, name, evs, self._model)
 
     def _lineup_variance(self, lineup, evs):
-        return _lineup_variance_fn(self._data, lineup, evs, self.scoring_rounds)
+        return _lineup_variance_fn(self._data, lineup, evs, self._model)
 
     def _max_lineup_score(self, lineup):
-        return _max_lineup_score_fn(self._data, lineup, self.scoring_rounds)
+        return _max_lineup_score_fn(self._data, lineup, self._model)
 
     def _print_lineup(self, title, note, player_evs, best_lineup):
         elo_label = {"elo": "Elo", "gelo": "gElo", "celo": "cElo", "helo": "hElo"}.get(self.elo_col, self.elo_col)
@@ -206,14 +208,14 @@ class ComprehensiveFantasyOptimizer:
                                        self.k_factor, live_elos)
 
     def _score_lineup_from_sim(self, lineup, rounds_won):
-        return _score_lineup_from_sim_fn(self._data, lineup, rounds_won, self.scoring_rounds)
+        return _score_lineup_from_sim_fn(self._data, lineup, rounds_won, self._model)
 
     def _cap_sim_pool(self, pool, n_trials, label=""):
         return _cap_sim_pool_fn(pool, n_trials, label)
 
     def run_simulations(self, lineups, n_trials=10000):
         return _run_simulations_fn(self._data, lineups, n_trials, self.advancements,
-                                   self.bo5, self.k_factor, self.scoring_rounds)
+                                   self.bo5, self.k_factor, self._model)
 
     def _find_top_lineups(self, player_evs, n):
         """Return the top-n distinct lineups by gross EV using branch-and-bound DFS."""
@@ -421,7 +423,7 @@ class ComprehensiveFantasyOptimizer:
             for name in priced:
                 scores[name].append(self._score_lineup_from_sim((name,), combined))
 
-        max_score = self.scoring_rounds * 2
+        max_score = self._model.max_score(7)
         THRESHOLDS = [k for k in [2, 4, 6, 8, 10, 12, 14] if k <= max_score]
         rows = []
         for k in THRESHOLDS:
@@ -760,8 +762,7 @@ class ComprehensiveFantasyOptimizer:
         # round_defs: (label, opp_lines, fallback, scores_at)
         # Rounds 1..max_rounds are real matches (last one = Final).
         # After the Final, append the "W" champion row (no opponent, P(reach) = p_ch).
-        # scoring begins at round (1-indexed) = max_rounds - scoring_rounds + 1
-        scoring_start = max_rounds - self.scoring_rounds  # 0-based index; rnd > scoring_start → scores
+        scoring_start = self._model.min_round(max_rounds)  # rounds > this index score
         round_defs = [
             (rnd, self._round_label(rnd, max_rounds), opp_sections[rnd - 1], fb[rnd - 1],
              rnd > scoring_start)

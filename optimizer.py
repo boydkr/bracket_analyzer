@@ -1,6 +1,8 @@
 import itertools
 import math
 
+from scoring import ScoringModel
+
 
 def meeting_block_size(data, name_a, name_b):
     """Smallest power-of-2 block containing both players' lines (same gender only)."""
@@ -16,41 +18,43 @@ def meeting_block_size(data, name_a, name_b):
     return size
 
 
-def pairwise_cov(data, name_a, name_b, evs, scoring_rounds):
+def pairwise_cov(data, name_a, name_b, evs, model: ScoringModel):
     """Cov[s_A, s_B] for two players. Zero for cross-gender (independent draws)."""
     if data.players[name_a]["gender"] != data.players[name_b]["gender"]:
         return 0.0
     mbs = meeting_block_size(data, name_a, name_b)
     gender = data.players[name_a]["gender"]
     max_rounds = data.gender_max_rounds.get(gender, 7)
-    min_idx = max(0, max_rounds - scoring_rounds - 1)
+    min_idx = model.prob_start_idx(max_rounds)
     meeting_idx = int(math.log2(mbs)) - 1
     first = max(min_idx, meeting_idx)
     ea = evs[name_a]["all_probs"]
     eb = evs[name_b]["all_probs"]
-    return 4.0 * sum(-ea[i] * eb[i] for i in range(first, max_rounds))
+    cov_per_pt = sum(-ea[i] * eb[i] for i in range(first, max_rounds))
+    return model.points_per_round ** 2 * cov_per_pt
 
 
-def score_variance(data, name, evs, scoring_rounds):
+def score_variance(data, name, evs, model: ScoringModel):
     """Var[s] for a single player's fantasy score."""
     p = evs[name]
     gender = data.players[name]["gender"]
     max_rounds = data.gender_max_rounds.get(gender, 7)
-    min_idx = max(0, max_rounds - scoring_rounds - 1)
+    min_idx = model.prob_start_idx(max_rounds)
     scoring_probs = p["all_probs"][min_idx:]
-    e_s2 = sum((8 * (j + 1) - 4) * scoring_probs[j] for j in range(len(scoring_probs)))
+    pts = model.points_per_round
+    e_s2 = sum((pts ** 2 * (2 * (j + 1) - 1)) * scoring_probs[j] for j in range(len(scoring_probs)))
     return e_s2 - p["ev"] ** 2
 
 
-def lineup_variance(data, lineup, evs, scoring_rounds):
+def lineup_variance(data, lineup, evs, model: ScoringModel):
     """Portfolio variance of the total lineup score."""
-    var = sum(score_variance(data, p, evs, scoring_rounds) for p in lineup)
+    var = sum(score_variance(data, p, evs, model) for p in lineup)
     for a, b in itertools.combinations(lineup, 2):
-        var += 2 * pairwise_cov(data, a, b, evs, scoring_rounds)
+        var += 2 * pairwise_cov(data, a, b, evs, model)
     return var
 
 
-def max_lineup_score(data, lineup, scoring_rounds):
+def max_lineup_score(data, lineup, model: ScoringModel):
     """Max points this lineup can score, accounting for players knocking each other out.
 
     For each round r, at most one lineup member per size-2^r bracket section can
@@ -62,14 +66,14 @@ def max_lineup_score(data, lineup, scoring_rounds):
         if not gender_members:
             continue
         max_rounds = data.gender_max_rounds.get(gender, 7)
-        min_r = max_rounds - scoring_rounds
+        min_r = model.min_round(max_rounds)
         lines = [data.players[n]["line"] for n in gender_members]
         for r in range(1, max_rounds + 1):
             if r < min_r:
                 continue
             section_size = 2 ** r
             sections_hit = {(ln - 1) // section_size for ln in lines}
-            total += 2 * len(sections_hit)
+            total += model.points_per_round * len(sections_hit)
     return total
 
 

@@ -2,6 +2,7 @@ import math
 import random
 
 from elo_math import calculate_match_win_prob
+from scoring import ScoringModel
 
 
 def simulate_tournament(data, gender, rng, advancements, bo5, k_factor=0, live_elos=None):
@@ -66,18 +67,14 @@ def simulate_tournament(data, gender, rng, advancements, bo5, k_factor=0, live_e
     return rounds_won
 
 
-def score_lineup_from_sim(data, lineup, rounds_won, scoring_rounds):
-    """Score a lineup against one simulated tournament result.
-    2 pts each for reaching the final scoring_rounds rounds."""
+def score_lineup_from_sim(data, lineup, rounds_won, model: ScoringModel):
+    """Score a lineup against one simulated tournament result."""
     score = 0
     for name in lineup:
         r = rounds_won.get(name, 0)
         gender = data.players[name]["gender"]
         max_rounds = data.gender_max_rounds.get(gender, 7)
-        min_r = max_rounds - scoring_rounds
-        for threshold in range(min_r, max_rounds + 1):
-            if r >= threshold:
-                score += 2
+        score += model.score(r, max_rounds)
     return score
 
 
@@ -97,7 +94,7 @@ def cap_sim_pool(pool, n_trials, label=""):
     return pool
 
 
-def run_simulations(data, lineups, n_trials, advancements, bo5, k_factor, scoring_rounds):
+def run_simulations(data, lineups, n_trials, advancements, bo5, k_factor, model: ScoringModel):
     """Run n_trials full-draw simulations. Returns list of sorted score lists, one per lineup."""
     rng = random.Random()
     scores = [[] for _ in lineups]
@@ -114,7 +111,7 @@ def run_simulations(data, lineups, n_trials, advancements, bo5, k_factor, scorin
             f_result = simulate_tournament(data, "F", rng, advancements, bo5)
         combined = {**m_result, **f_result}
         for i, (_, lineup) in enumerate(lineups):
-            scores[i].append(score_lineup_from_sim(data, lineup, combined, scoring_rounds))
+            scores[i].append(score_lineup_from_sim(data, lineup, combined, model))
 
     for s in scores:
         s.sort()
