@@ -11,7 +11,6 @@ from name_matching import (
 )
 from elo_math import calculate_match_win_prob
 from elo_fetcher import update_elo_files
-from formatting import pct as _pct, fmt_player as _fmt_player, fixed_table as _fixed_table
 from data_loader import BracketData, load_data as _load_data, load_preset_lineups as _load_preset_lineups
 from bracket import (
     label_to_round as _label_to_round_fn,
@@ -37,6 +36,9 @@ from optimizer import (
     find_top_lineups as _find_top_lineups_fn,
 )
 from scoring import ScoringModel
+import rows as _rows
+import output as _output
+from output import OutputConfig as _OutputConfig
 
 
 
@@ -152,56 +154,11 @@ class ComprehensiveFantasyOptimizer:
         return _max_lineup_score_fn(self._data, lineup, self._model)
 
     def _print_lineup(self, title, note, player_evs, best_lineup):
-        elo_label = {"elo": "Elo", "gelo": "gElo", "celo": "cElo", "helo": "hElo"}.get(self.elo_col, self.elo_col)
-        gross_ev = round(sum(player_evs[p]["ev"] for p in best_lineup), 3)
-        tokens = sum(self.players[p]["cost"] for p in best_lineup)
-        portfolio_var = self._lineup_variance(best_lineup, player_evs)
-        portfolio_std = math.sqrt(max(portfolio_var, 0))
-
-        # P(lineup contains winner) per gender — sum of p_ch (mutually exclusive events)
-        winner_probs = {}
-        for p in best_lineup:
-            g = self.players[p]["gender"]
-            winner_probs[g] = winner_probs.get(g, 0.0) + player_evs[p]["p_ch"]
-        p_any_winner = 1.0 - math.prod(1.0 - v for v in winner_probs.values())
-        max_score = self._max_lineup_score(best_lineup)
-        winner_str = f"P(winner): {_pct(p_any_winner)}%  |  Max: {max_score}"
-
-        if self.discord:
-            rows = []
-            for p in best_lineup:
-                pd = self.players[p]
-                s = player_evs[p]
-                f = _fmt_player(pd, s, self.elo_col)
-                indiv_std = math.sqrt(max(self._score_variance(p, player_evs), 0))
-                rows.append([p, pd["gender"], pd["cost"], f["elo"],
-                              f["p_qf"], f["p_sf"], f["p_f"], f["p_ch"],
-                              f["ev"], f["ev_tok"], f"{indiv_std:.2f}", f"Q{pd['quadrant']}", f["draw_eff"]])
-            headers = ["Player", "G", "Cost", elo_label,
-                       "QF%", "SF%", "F%", "W%", "EV", "EV/Tok", "StdDev", "Quad", "DrawEff"]
-            lines = _fixed_table(headers, rows)
-            print(f"**{title}**")
-            if note:
-                print(f"_{note}_")
-            print(f"EV: {gross_ev:.2f}  |  StdDev: {portfolio_std:.2f}  |  Tokens: {tokens}/{self.token_cap}  |  {winner_str}")
-            print("```")
-            print("\n".join(lines))
-            print("```")
-        else:
-            print(f"**Total Portfolio EV:** {gross_ev:.2f} Points")
-            print(f"**Portfolio StdDev:** {portfolio_std:.2f} Points")
-            print(f"**Total Capital Spent:** {tokens} / {self.token_cap} Tokens")
-            print(f"**{winner_str}**\n")
-            print(f"| Selected Athlete | Gender | Cost | {elo_label} | QF% | SF% | F% | W% | EV | EV/Token | StdDev | Bracket Quadrant | DrawEff |")
-            print("| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |")
-            for p in best_lineup:
-                pd = self.players[p]
-                s = player_evs[p]
-                f = _fmt_player(pd, s, self.elo_col)
-                indiv_std = math.sqrt(max(self._score_variance(p, player_evs), 0))
-                print(f"| **{p}** | {pd['gender']} | {pd['cost']} | {f['elo']} "
-                      f"| {f['p_qf']} | {f['p_sf']} | {f['p_f']} | {f['p_ch']} "
-                      f"| {f['ev']} | {f['ev_tok']} | {indiv_std:.2f} | Quarter {pd['quadrant']} | {f['draw_eff']} |")
+        cfg = _OutputConfig(discord=self.discord)
+        summary = _rows.lineup_summary(self._data, player_evs, best_lineup, self._model,
+                                       self.token_cap, self.elo_col)
+        lrows = _rows.lineup_rows(self._data, player_evs, best_lineup, self._model, self.elo_col)
+        _output.print_lineup(lrows, summary, title, note, cfg)
 
     def _simulate_tournament(self, gender, rng, live_elos=None):
         return _simulate_tournament_fn(self._data, gender, rng, self.advancements, self.bo5,
@@ -243,170 +200,23 @@ class ComprehensiveFantasyOptimizer:
         return top_lineups, evaluated
 
     def _print_sim_comparison(self, lineups, sim_scores, player_evs, labels=None):
-        """Compare analytical EV/stddev vs simulated mean/stddev for each lineup."""
-        rows = []
-        for i, (ev, lineup) in enumerate(lineups):
-            label = labels[i] if labels else f"#{i+1}"
-            exp_ev = ev
-            exp_std = math.sqrt(max(self._lineup_variance(lineup, player_evs), 0))
-
-            scores = sim_scores[i]
-            n = len(scores)
-            sim_mean = sum(scores) / n
-            sim_std = math.sqrt(sum((s - sim_mean) ** 2 for s in scores) / n)
-
-            rows.append([
-                label,
-                f"{exp_ev:.2f}", f"{exp_std:.2f}",
-                f"{sim_mean:.2f}", f"{sim_std:.2f}",
-                f"{sim_mean - exp_ev:+.2f}",
-            ])
-
-        headers = ["Lineup", "E[EV]", "E[σ]", "Sim μ", "Sim σ", "Δμ"]
-        if self.discord:
-            print("**Analytical vs Simulated**")
-            print("```")
-            print("\n".join(_fixed_table(headers, rows)))
-            print("```")
-        else:
-            print("**Analytical vs Simulated**\n")
-            print("| " + " | ".join(headers) + " |")
-            print("| " + " | ".join(["---"] * len(headers)) + " |")
-            for row in rows:
-                print("| " + " | ".join(row) + " |")
-            print()
+        cfg = _OutputConfig(discord=self.discord)
+        crows = _rows.sim_comparison_rows(self._data, lineups, sim_scores, player_evs, self._model, labels)
+        _output.print_sim_comparison(crows, cfg)
 
     def _print_score_distributions(self, lineups, sim_scores, labels=None):
-        """Print a side-by-side P(score=k) and P(score>=k) table for all lineups."""
-        n = len(sim_scores[0])
-        # Determine score range across all lineups
-        max_score = max(max(s) for s in sim_scores)
-        scores_range = range(0, max_score + 2, 2)
-
-        # Build frequency dicts
-        freq = []
-        for scores in sim_scores:
-            fd = {}
-            for s in scores:
-                fd[s] = fd.get(s, 0) + 1
-            freq.append(fd)
-
-        lineup_labels = labels if labels else [f"#{i+1}" for i in range(len(lineups))]
-
-        # P(score=k) table — exclude rows where all columns are < 0.1%
-        p_rows = []
-        for k in scores_range:
-            vals = [fd.get(k, 0) / n * 100 for fd in freq]
-            if max(vals) < 0.1:
-                continue
-            p_rows.append([str(k)] + [f"{v:.1f}%" for v in vals])
-
-        # P(score>=k) table — precompute all values, then filter rows where
-        # no column changed by >= 0.1pp from the previous included row
-        ge_all = []
-        for k in scores_range:
-            if k == 0:
-                continue
-            vals = [sum(fd.get(s, 0) for s in scores_range if s >= k) / n * 100 for fd in freq]
-            ge_all.append((k, vals))
-
-        ge_rows = []
-        prev_vals = None
-        for k, vals in ge_all:
-            if all(v == 0.0 for v in vals):
-                continue
-            if prev_vals is None or any(abs(v - pv) >= 0.1 for v, pv in zip(vals, prev_vals)):
-                ge_rows.append([str(k)] + [f"{v:.1f}%" for v in vals])
-                prev_vals = vals
-
-        headers = ["Score"] + lineup_labels
-
-        if self.discord:
-            print("**Score Distribution  P(score = k)**")
-            print("```")
-            print("\n".join(_fixed_table(headers, p_rows)))
-            print("```")
-            print("**Exceedance  P(score ≥ k)**")
-            print("```")
-            print("\n".join(_fixed_table(headers, ge_rows)))
-            print("```")
-        else:
-            print("### Score Distribution  P(score = k)\n")
-            print("| " + " | ".join(headers) + " |")
-            print("| " + " | ".join(["---"] * len(headers)) + " |")
-            for row in p_rows:
-                print("| " + " | ".join(row) + " |")
-            print()
-            print("### Exceedance  P(score ≥ k)\n")
-            print("| " + " | ".join(headers) + " |")
-            print("| " + " | ".join(["---"] * len(headers)) + " |")
-            for row in ge_rows:
-                print("| " + " | ".join(row) + " |")
-            print()
+        cfg = _OutputConfig(discord=self.discord)
+        p_rows, ge_rows, headers = _rows.score_distribution_rows(sim_scores, labels)
+        _output.print_score_distributions(p_rows, ge_rows, headers, cfg)
 
     def _print_analysis(self, evaluated, top_k=100):
-        """Player frequency and pairwise co-occurrence across the top-k lineups by EV."""
         if not evaluated:
             return
-        members = evaluated[-top_k:]  # evaluated is sorted ascending, so tail = highest EV
-        nm = len(members)
-        evs = [ev for ev, _ in members]
-        min_ev = evs[0]
-        max_ev = evs[-1]
-        avg_ev = sum(evs) / nm
-        std_ev = math.sqrt(sum((e - avg_ev) ** 2 for e in evs) / nm)
-        print(f"\n**Analysis: top {nm} lineups  (EV {min_ev:.2f} – {max_ev:.2f},  avg {avg_ev:.2f},  σ {std_ev:.2f})**")
-
-        all_players = sorted({p for _, combo in members for p in combo})
-
-        # Player frequency
-        freq = {p: sum(1 for _, combo in members if p in combo) for p in all_players}
-        freq_sorted = sorted(freq.items(), key=lambda x: -x[1])
-        freq_rows = [[p, str(f), f"{f/nm*100:.0f}%"] for p, f in freq_sorted if f / nm >= 0.20]
-
-        # Individual frequencies as fractions for lift calculation
-        freq_frac = {p: f / nm for p, f in freq_sorted}
-
-        # Pairwise lift: observed co-occurrence / (P(A) * P(B))
-        # Only for players 20%-95% frequent; filter pairs at >=10% co-occurrence
-        common = [p for p, f in freq_sorted]
-        pair_rows = []
-        for i, pa in enumerate(common):
-            for pb in common[i+1:]:
-                both = sum(1 for _, combo in members if pa in combo and pb in combo)
-                p_both = both / nm
-                if both >= 2:
-                    expected = freq_frac[pa] * freq_frac[pb]
-                    lift = p_both / expected if expected > 0 else 0.0
-                    pair_rows.append([f"{pa} + {pb}", str(both), f"{lift:.2f}"])
-        pair_rows.sort(key=lambda r: -float(r[2]))
-        pair_rows = pair_rows[:20]
-
-        if self.discord:
-            print("**Player Frequency**")
-            print("```")
-            print("\n".join(_fixed_table(["Player", "Count", "Freq%"], freq_rows)))
-            print("```")
-            if pair_rows:
-                print("**Pairs (lift = observed / expected)**")
-                print("```")
-                print("\n".join(_fixed_table(["Pair", "Count", "Lift"], pair_rows)))
-                print("```")
-        else:
-            print("**Player Frequency**\n")
-            print("| Player | Count | Freq% |")
-            print("| --- | --- | --- |")
-            for row in freq_rows:
-                print("| " + " | ".join(row) + " |")
-            if pair_rows:
-                print("\n**Pairs (lift = observed / expected)**\n")
-                print("| Pair | Count | Lift |")
-                print("| --- | --- | --- |")
-                for row in pair_rows:
-                    print("| " + " | ".join(row) + " |")
+        cfg = _OutputConfig(discord=self.discord)
+        freq_rows, pair_rows, summary_str = _rows.analysis_rows(evaluated, top_k)
+        _output.print_analysis(freq_rows, pair_rows, summary_str, cfg)
 
     def _print_best_player_at(self, player_evs):
-        """Simulate individual players, then show best pick by P(score >= k) per threshold."""
         import random
         n_trials = self.n_simulations
         rng = random.Random()
@@ -423,41 +233,20 @@ class ComprehensiveFantasyOptimizer:
             for name in priced:
                 scores[name].append(self._score_lineup_from_sim((name,), combined))
 
-        max_score = self._model.max_score(7)
-        THRESHOLDS = [k for k in [2, 4, 6, 8, 10, 12, 14] if k <= max_score]
-        rows = []
-        for k in THRESHOLDS:
-            ge = {name: sum(1 for s in scores[name] if s >= k) / n_trials * 100 for name in priced}
-            best = max(priced, key=lambda n: ge[n])
-            ev = player_evs[best]["ev"]
-            cost = self.players[best]["cost"]
-            rows.append([f"≥{k}", f"{ge[best]:.1f}%", f"{ev:.2f}", f"{cost}", best])
-
-        headers = ["Score", "P(≥k)", "EV", "Cost", "Player"]
-        if self.discord:
-            print(f"\n**Best single pick by P(score ≥ k)**")
-            print("```")
-            print("\n".join(_fixed_table(headers, rows)))
-            print("```")
-        else:
-            print(f"\n### Best single pick by P(score ≥ k)\n")
-            print("| " + " | ".join(headers) + " |")
-            print("| " + " | ".join(["---"] * len(headers)) + " |")
-            for row in rows:
-                print("| " + " | ".join(row) + " |")
-            print()
+        cfg = _OutputConfig(discord=self.discord)
+        brows = _rows.best_player_at_rows(priced, scores, player_evs, self._data, self._model)
+        _output.print_best_player_at(brows, cfg)
 
     def _print_path_simulations(self, player_name, n_trials):
-        """Simulate the tournament n_trials times and show:
-        1. Simulated vs analytical round-reach rates for this player.
-        2. Score distribution P(score=k) and P(score>=k)."""
         import random
         rng = random.Random()
         pd = self.players[player_name]
         gender = pd["gender"]
         max_rounds = self._max_rounds(gender)
+        size = 2 ** max_rounds
+        opp_sections = _bracket_opponent_lines_fn(pd["line"], size)
 
-        rounds_reached = [0] * (max_rounds + 1)  # index = round number (1-based)
+        rounds_reached = [0] * (max_rounds + 1)
         score_counts = {}
 
         print(f"Running {n_trials:,} simulations for {player_name}...", flush=True)
@@ -471,92 +260,12 @@ class ComprehensiveFantasyOptimizer:
             score_counts[score] = score_counts.get(score, 0) + 1
 
         ev = self.compute_ev(player_name)
-        all_p = ev["all_probs"]
-
-        # Generate correct round labels for this draw size
-        # Label for winning match rnd = the round just played
-        # Detect bye rounds: opponent section contains only BYE sentinels
-        line = pd["line"]
-        size = 2 ** max_rounds
-        opp_sections = self._bracket_opponent_lines(line, size)
-        def is_bye_section(opp_lines):
-            probs = self._section_win_probs(opp_lines, gender)
-            real = [j for j in probs if self._line_index[(gender, j)]["elo"] > 0.0]
-            return len(real) == 0
-
-        # Table 1: simulated vs analytical reach rates (skip bye rounds)
-        # P(reach round rnd) = P(won rnd-1 matches).  rounds_reached[0] = n_trials (always in draw).
-        rounds_reached[0] = n_trials
-        rows1 = []
-        for rnd in range(1, max_rounds + 1):
-            opp_lines = opp_sections[rnd - 1]
-            if is_bye_section(opp_lines):
-                continue
-            label = self._round_label(rnd, max_rounds)
-            sim_pct = rounds_reached[rnd - 1] / n_trials
-            ana_pct = all_p[rnd - 2] if rnd > 1 else 1.0
-            rows1.append([label, _pct(sim_pct) + "%", _pct(ana_pct) + "%",
-                          f"{(sim_pct - ana_pct)*100:+.1f}pp"])
-        # Champion row
-        sim_w = rounds_reached[max_rounds] / n_trials
-        ana_w = all_p[max_rounds - 1]
-        rows1.append(["W", _pct(sim_w) + "%", _pct(ana_w) + "%",
-                      f"{(sim_w - ana_w)*100:+.1f}pp"])
-
-        headers1 = ["Round", "Sim", "Analytical", "Δ"]
-
-        # Table 2: score distribution
-        max_score = max(score_counts.keys()) if score_counts else 0
-        scores_range = range(0, max_score + 2, 2)
-        p_rows = [[str(k), f"{score_counts.get(k,0)/n_trials*100:.1f}%"]
-                  for k in scores_range if score_counts.get(k, 0) / n_trials * 100 >= 0.1]
-        ge_rows = []
-        prev = None
-        for k in scores_range:
-            if k == 0:
-                continue
-            v = sum(score_counts.get(s, 0) for s in scores_range if s >= k) / n_trials * 100
-            if v == 0:
-                continue
-            if prev is None or abs(v - prev) >= 0.1:
-                ge_rows.append([str(k), f"{v:.1f}%"])
-                prev = v
-
-        headers2 = ["Score", "P(=k)"]
-        headers3 = ["Score", "P(≥k)"]
-
-        if self.discord:
-            print("\n**Simulated vs Analytical reach rates**")
-            print("```")
-            print("\n".join(_fixed_table(headers1, rows1)))
-            print("```")
-            print("**Score Distribution  P(score = k)**")
-            print("```")
-            print("\n".join(_fixed_table(headers2, p_rows)))
-            print("```")
-            print("**Exceedance  P(score ≥ k)**")
-            print("```")
-            print("\n".join(_fixed_table(headers3, ge_rows)))
-            print("```")
-        else:
-            print("\n### Simulated vs Analytical reach rates\n")
-            print("| " + " | ".join(headers1) + " |")
-            print("| " + " | ".join(["---"] * len(headers1)) + " |")
-            for row in rows1:
-                print("| " + " | ".join(row) + " |")
-            print()
-            print("### Score Distribution  P(score = k)\n")
-            print("| " + " | ".join(headers2) + " |")
-            print("| --- | --- |")
-            for row in p_rows:
-                print("| " + " | ".join(row) + " |")
-            print()
-            print("### Exceedance  P(score ≥ k)\n")
-            print("| " + " | ".join(headers3) + " |")
-            print("| --- | --- |")
-            for row in ge_rows:
-                print("| " + " | ".join(row) + " |")
-            print()
+        rows1, p_rows, ge_rows = _rows.path_sim_rows(
+            player_name, rounds_reached, score_counts, ev["all_probs"], n_trials,
+            self._data, opp_sections, self.advancements, self.bo5,
+        )
+        cfg = _OutputConfig(discord=self.discord)
+        _output.print_path_simulations(rows1, p_rows, ge_rows, cfg)
 
     def load_preset_lineups(self, player_evs):
         return _load_preset_lineups(self.lineups_path, self._data, player_evs)
@@ -658,19 +367,8 @@ class ComprehensiveFantasyOptimizer:
                 f"{pool_label_map[floor_winner]}: {', '.join(f_last_names)}",
             ])
 
-            header_line = f"**Best lineup by P(score ≥ k)  (across top-{len(pool)} lineups)**"
-            if self.discord:
-                print(header_line)
-                print("```")
-                print("\n".join(_fixed_table(["Score", "P(≥k)", "EV", "Lineup"], rows)))
-                print("```")
-            else:
-                print(f"{header_line}\n")
-                print("| Score | P(≥k) | EV | Lineup |")
-                print("| --- | --- | --- | --- |")
-                for row in rows:
-                    print("| " + " | ".join(row) + " |")
-                print()
+            cfg = _OutputConfig(discord=self.discord)
+            _output.print_best_at_table(rows, len(pool), cfg)
 
         else:
             sim_scores = None
@@ -696,204 +394,21 @@ class ComprehensiveFantasyOptimizer:
             self._print_analysis(evaluated)
 
     def _print_pool_section(self, title, gender, player_evs, elo_label, top_evtok_names=None):
-        names = sorted(
-            [n for n, p in self.players.items() if p["is_priced"] and p["gender"] == gender],
-            key=lambda n: player_evs[n]["ev"],
-            reverse=True,
-        )
-        if top_evtok_names is None:
-            top_evtok_names = set()
-        if self.discord:
-            rows = []
-            for name in names:
-                pd = self.players[name]
-                s = player_evs[name]
-                f = _fmt_player(pd, s, self.elo_col)
-                evtok = f["ev_tok"] + "*" if name in top_evtok_names else f["ev_tok"]
-                rows.append([name, pd["cost"], f["elo"],
-                              f["p_qf"], f["p_sf"], f["p_f"], f["p_ch"],
-                              f["ev"], evtok, f["draw_eff"]])
-            headers = ["Player", "Cost", elo_label, "QF%", "SF%", "F%", "W%", "EV", "EV/Tok", "DrawEff"]
-            lines = _fixed_table(headers, rows)
-            if title:
-                print(f"**{title}**")
-            print("```")
-            print("\n".join(lines))
-            print("```")
-        else:
-            if title:
-                print(f"### {title}\n")
-            print(f"| Player | Cost | {elo_label} | QF% | SF% | F% | W% | EV | EV/Token | DrawEff |")
-            print("| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |")
-            for name in names:
-                pd = self.players[name]
-                s = player_evs[name]
-                f = _fmt_player(pd, s, self.elo_col)
-                evtok = f["ev_tok"] + "*" if name in top_evtok_names else f["ev_tok"]
-                print(f"| **{name}** | {pd['cost']} | {f['elo']} "
-                      f"| {f['p_qf']} | {f['p_sf']} | {f['p_f']} | {f['p_ch']} "
-                      f"| {f['ev']} | {evtok} | {f['draw_eff']} |")
-            print()
+        cfg = _OutputConfig(discord=self.discord)
+        prows = _rows.pool_section_rows(self._data, player_evs, gender, self.elo_col, top_evtok_names)
+        _output.print_pool_section(prows, title, elo_label, cfg)
 
     def print_path(self, player_name):
-        p_data = self.players[player_name]
-        gender  = p_data["gender"]
-        p_elo   = p_data["elo"]
-        line    = p_data["line"]
-        quad    = p_data["quadrant"]
-        elo_label = {"elo": "Elo", "gelo": "gElo", "celo": "cElo", "helo": "hElo"}.get(self.elo_col, self.elo_col)
-
-        cost_str = f"Cost {p_data['cost']}  |  " if p_data["is_priced"] else ""
+        cfg = _OutputConfig(discord=self.discord)
         ev = self.compute_ev(player_name)
-        ev_tok_str = f"  |  EV/Tok {ev['ev']/p_data['cost']:.2f}" if p_data["is_priced"] else ""
-        header = (f"Path: {player_name}  (line {line}, Q{quad}, {gender})  "
-                  f"{elo_label} {round(p_elo)}  |  {cost_str}EV {ev['ev']:.2f}{ev_tok_str}")
-
-        max_rounds = self._max_rounds(gender)
-        size = 2 ** max_rounds
-        opp_sections = self._bracket_opponent_lines(line, size)
-
-        fb_starts = {1: 1500.0, 2: 1520.0, 3: 1510.0, 4: 1530.0}
-        fb_end = 1950.0
-        start = fb_starts[quad]
-        fb = ([fb_end] if max_rounds == 1
-              else [start + (fb_end - start) * i / (max_rounds - 1) for i in range(max_rounds)])
-
-        # round_defs: (label, opp_lines, fallback, scores_at)
-        # Rounds 1..max_rounds are real matches (last one = Final).
-        # After the Final, append the "W" champion row (no opponent, P(reach) = p_ch).
-        scoring_start = self._model.min_round(max_rounds)  # rounds > this index score
-        round_defs = [
-            (rnd, self._round_label(rnd, max_rounds), opp_sections[rnd - 1], fb[rnd - 1],
-             rnd > scoring_start)
-            for rnd in range(1, max_rounds + 1)
-        ]
-        # Champion "W" row — no opponent section, win_p = 1.0
-        round_defs.append((max_rounds + 1, "W", [], None, (max_rounds + 1) > scoring_start))
-
-        advance_through = self.advancements.get(player_name)
-
-        # Cumulative reach probability, updated each round
-        p_reach = 1.0
-        rows = []
-
-        for rnd, rnd_name, opp_lines, fallback, scores_at in round_defs:
-            if rnd_name == "W":
-                win_p = 1.0
-                opp_str = "—"
-                is_bye = False
-            elif advance_through is not None and rnd <= advance_through:
-                win_p = 1.0
-                probs = self._section_win_probs(opp_lines, gender, first_round=1)
-                real_probs = {j: p_j for j, p_j in probs.items()
-                              if self._line_index[(gender, j)]["elo"] > 0.0}
-                if not real_probs:
-                    continue
-                top = sorted(real_probs.items(), key=lambda x: -x[1])[:3]
-                opp_parts = []
-                for j, p_j in top:
-                    opp_name = self._line_to_name.get((gender, j), f"line {j}")
-                    opp_elo = self._line_index[(gender, j)]["elo"]
-                    opp_parts.append(f"{opp_name} ({round(opp_elo)}, {_pct(p_j)}%)")
-                opp_str = " / ".join(opp_parts) + "  [forced]"
-            else:
-                probs = self._section_win_probs(opp_lines, gender, first_round=1)
-
-                if probs:
-                    # Bye: all opponents in the section are BYE sentinels (elo 0.0)
-                    real_probs = {j: p_j for j, p_j in probs.items()
-                                  if self._line_index[(gender, j)]["elo"] > 0.0}
-                    if not real_probs:
-                        p_reach = p_reach * 1.0  # advance past bye
-                        continue
-                    is_bye = False
-                    top = sorted(real_probs.items(), key=lambda x: -x[1])[:3]
-                    win_p_parts = []
-                    for j, p_j in probs.items():
-                        adv_j = self.advancements.get(self._line_to_name.get((gender, j)))
-                        if adv_j is not None and rnd <= adv_j:
-                            pw = 0.0
-                        else:
-                            pw = self._win_prob(p_elo, self._line_index[(gender, j)]["elo"], gender)
-                        win_p_parts.append(p_j * pw)
-                    win_p = sum(win_p_parts)
-                    opp_parts = []
-                    for j, p_j in top:
-                        opp_name = self._line_to_name.get((gender, j), f"line {j}")
-                        opp_elo = self._line_index[(gender, j)]["elo"]
-                        opp_parts.append(f"{opp_name} ({round(opp_elo)}, {_pct(p_j)}%)")
-                    opp_str = " / ".join(opp_parts)
-                else:
-                    is_bye = False
-                    win_p = self._win_prob(p_elo, fallback, gender)
-                    opp_str = f"unknown (fallback {elo_label} {round(fallback)})"
-
-            p_reach_next = p_reach * win_p
-            rnd_pts = 2 * p_reach if scores_at else 0.0
-
-            rows.append([
-                rnd_name,
-                opp_str,
-                _pct(win_p) + "%",
-                _pct(p_reach) + "%",
-                f"{rnd_pts:.2f}" if rnd_pts > 0 else "—",
-            ])
-            p_reach = p_reach_next
-
-        headers = ["Round", "Opponent(s)  (Elo, P(faces you))", "Win%", "P(reach)", "E[pts]"]
-
-        if self.discord:
-            lines_out = _fixed_table(headers, rows)
-            print(f"**{header}**")
-            print("```")
-            print("\n".join(lines_out))
-            print("```")
-        else:
-            print(f"### {header}\n")
-            print("| " + " | ".join(headers) + " |")
-            print("| " + " | ".join(["---"] * len(headers)) + " |")
-            for row in rows:
-                print("| " + " | ".join(str(c) for c in row) + " |")
-            print()
+        prows, headers, header_str = _rows.path_rows(
+            self._data, player_name, ev, self.advancements, self.bo5, self._model, self.elo_col)
+        _output.print_path(prows, headers, header_str, cfg)
 
     def _print_draw_efficiency(self, player_evs, elo_label):
-        """Print all priced players sorted by draw efficiency descending."""
-        priced = [
-            n for n, pd in self.players.items()
-            if pd["is_priced"] and player_evs[n].get("draw_eff") is not None
-        ]
-        priced.sort(key=lambda n: player_evs[n]["draw_eff"], reverse=True)
-
-        if self.discord:
-            rows = []
-            for name in priced:
-                pd = self.players[name]
-                s = player_evs[name]
-                f = _fmt_player(pd, s, self.elo_col)
-                neutral_ev = s.get("neutral_ev")
-                n_ev_str = f"{neutral_ev:.2f}" if neutral_ev is not None else "—"
-                n_evtok_str = f"{neutral_ev/pd['cost']:.2f}" if neutral_ev is not None else "—"
-                rows.append([name, pd["gender"], pd["cost"], f["elo"],
-                              n_ev_str, f["ev"], n_evtok_str, f["ev_tok"], f["draw_eff"]])
-            headers = ["Player", "G", "Cost", elo_label, "NeutralEV", "EV", "Neut/Tok", "EV/Tok", "DrawEff"]
-            print("**DRAW EFFICIENCY**")
-            print("```")
-            print("\n".join(_fixed_table(headers, rows)))
-            print("```")
-        else:
-            print("## DRAW EFFICIENCY\n")
-            print(f"| Player | G | Cost | {elo_label} | NeutralEV | EV | Neut/Token | EV/Token | DrawEff |")
-            print("| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |")
-            for name in priced:
-                pd = self.players[name]
-                s = player_evs[name]
-                f = _fmt_player(pd, s, self.elo_col)
-                neutral_ev = s.get("neutral_ev")
-                n_ev_str = f"{neutral_ev:.2f}" if neutral_ev is not None else "—"
-                n_evtok_str = f"{neutral_ev/pd['cost']:.2f}" if neutral_ev is not None else "—"
-                print(f"| **{name}** | {pd['gender']} | {pd['cost']} | {f['elo']} "
-                      f"| {n_ev_str} | {f['ev']} | {n_evtok_str} | {f['ev_tok']} | {f['draw_eff']} |")
-            print()
+        cfg = _OutputConfig(discord=self.discord)
+        drows = _rows.draw_efficiency_rows(self._data, player_evs, self.elo_col)
+        _output.print_draw_efficiency(drows, elo_label, cfg)
 
     def run_optimization(self):
         if not self.players:
