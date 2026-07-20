@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 import csv
-import itertools
 import math
 
 from name_matching import (
@@ -28,6 +27,14 @@ from simulator import (
     score_lineup_from_sim as _score_lineup_from_sim_fn,
     cap_sim_pool as _cap_sim_pool_fn,
     run_simulations as _run_simulations_fn,
+)
+from optimizer import (
+    meeting_block_size as _meeting_block_size_fn,
+    pairwise_cov as _pairwise_cov_fn,
+    score_variance as _score_variance_fn,
+    lineup_variance as _lineup_variance_fn,
+    max_lineup_score as _max_lineup_score_fn,
+    find_top_lineups as _find_top_lineups_fn,
 )
 
 
@@ -128,73 +135,19 @@ class ComprehensiveFantasyOptimizer:
         return _compute_draw_efficiency_fn(self._data, player_name, player_evs, self.scoring_rounds, self.bo5)
 
     def _meeting_block_size(self, name_a, name_b):
-        """Smallest power-of-2 block containing both players' lines (same gender only)."""
-        la = self.players[name_a]["line"]
-        lb = self.players[name_b]["line"]
-        gender = self.players[name_a]["gender"]
-        size = 2 ** self._max_rounds(gender)
-        mbs = 2
-        while mbs <= size:
-            if (la - 1) // mbs == (lb - 1) // mbs:
-                return mbs
-            mbs *= 2
-        return size
+        return _meeting_block_size_fn(self._data, name_a, name_b)
 
     def _pairwise_cov(self, name_a, name_b, evs):
-        """Cov[s_A, s_B] for two players.  Zero for cross-gender (independent draws)."""
-        if self.players[name_a]["gender"] != self.players[name_b]["gender"]:
-            return 0.0
-        mbs = self._meeting_block_size(name_a, name_b)
-        gender = self.players[name_a]["gender"]
-        max_rounds = self._max_rounds(gender)
-        min_idx = max(0, max_rounds - self.scoring_rounds - 1)
-        # meeting_idx: 0-based index in all_probs where these two could first meet
-        meeting_idx = int(math.log2(mbs)) - 1
-        first = max(min_idx, meeting_idx)
-        ea = evs[name_a]["all_probs"]
-        eb = evs[name_b]["all_probs"]
-        return 4.0 * sum(-ea[i] * eb[i] for i in range(first, max_rounds))
+        return _pairwise_cov_fn(self._data, name_a, name_b, evs, self.scoring_rounds)
 
     def _score_variance(self, name, evs):
-        """Var[s] for a single player's fantasy score."""
-        p = evs[name]
-        gender = self.players[name]["gender"]
-        min_idx = max(0, self._max_rounds(gender) - self.scoring_rounds - 1)
-        scoring_probs = p["all_probs"][min_idx:]
-        e_s2 = sum((8*(j+1) - 4) * scoring_probs[j] for j in range(len(scoring_probs)))
-        return e_s2 - p["ev"] ** 2
+        return _score_variance_fn(self._data, name, evs, self.scoring_rounds)
 
     def _lineup_variance(self, lineup, evs):
-        """Portfolio variance of the total lineup score."""
-        var = sum(self._score_variance(p, evs) for p in lineup)
-        for a, b in itertools.combinations(lineup, 2):
-            var += 2 * self._pairwise_cov(a, b, evs)
-        return var
-
-
+        return _lineup_variance_fn(self._data, lineup, evs, self.scoring_rounds)
 
     def _max_lineup_score(self, lineup):
-        """Max points this lineup can score, accounting for players knocking each other out.
-
-        For each round r, at most one lineup member per size-2^r bracket section can
-        achieve r wins. So max achievers at round r = # sections of size 2^r with ≥1
-        lineup member. Sum over all scoring rounds."""
-        total = 0
-        for gender in ("M", "F"):
-            gender_members = [n for n in lineup if self.players[n]["gender"] == gender]
-            if not gender_members:
-                continue
-            max_rounds = self._max_rounds(gender)
-            size = 2 ** max_rounds
-            min_r = max_rounds - self.scoring_rounds
-            lines = [self.players[n]["line"] for n in gender_members]
-            for r in range(1, max_rounds + 1):
-                if r < min_r:
-                    continue
-                section_size = 2 ** r
-                sections_hit = {(ln - 1) // section_size for ln in lines}
-                total += 2 * len(sections_hit)
-        return total
+        return _max_lineup_score_fn(self._data, lineup, self.scoring_rounds)
 
     def _print_lineup(self, title, note, player_evs, best_lineup):
         elo_label = {"elo": "Elo", "gelo": "gElo", "celo": "cElo", "helo": "hElo"}.get(self.elo_col, self.elo_col)
@@ -264,130 +217,28 @@ class ComprehensiveFantasyOptimizer:
 
     def _find_top_lineups(self, player_evs, n):
         """Return the top-n distinct lineups by gross EV using branch-and-bound DFS."""
-        candidates = sorted(
-            [p for p in self.players if self.players[p]["is_priced"] and p not in self.excluded],
-            key=lambda x: player_evs[x]["ev"], reverse=True,
+        top_lineups, evaluated, ev_histogram = _find_top_lineups_fn(
+            self._data, player_evs, n,
+            excluded=self.excluded,
+            included=self.included,
+            token_cap=self.token_cap,
+            lineup_size=self.lineup_size,
+            ev_floor=self.ev_floor,
         )
-        # Forced inclusions: validate and pre-deduct their cost/slots
-        forced = [p for p in self.included if p in {c for c in candidates}]
-        forced_cost = sum(self.players[p]["cost"] for p in forced)
-        forced_ev   = sum(player_evs[p]["ev"]    for p in forced)
-        forced_slots = len(forced)
-        candidates = [p for p in candidates if p not in self.included]
-        nc = len(candidates)
-        costs_arr = [self.players[p]["cost"] for p in candidates]
-        evs_arr   = [player_evs[p]["ev"]    for p in candidates]
-
-        # ev_suffix[i] = sum(evs_arr[i:])  — used for EV upper-bound pruning
-        ev_suffix = [0.0] * (nc + 1)
-        for i in range(nc - 1, -1, -1):
-            ev_suffix[i] = ev_suffix[i + 1] + evs_arr[i]
-
-        if self.lineup_size is not None:
-            # Fixed size: exactly lineup_size players, no token constraint
-            min_size = max(0, self.lineup_size - forced_slots)
-            max_size = max(0, self.lineup_size - forced_slots)
-        else:
-            # Token-capped: any size from 1 up to all candidates
-            min_size = 1
-            max_size = nc + forced_slots
-
-        def run_search(prune_floor, collect_all=False):
-            results = []
-            evaluated = []
-
-            def nth_best():
-                return results[-1][0] if len(results) == n else -1.0
-
-            def cutoff():
-                # When collecting all lineups in the floor window, hold pruning fixed
-                # at prune_floor so nth_best() can't tighten it as results accumulate.
-                return prune_floor if collect_all else max(nth_best(), prune_floor)
-
-            def search(idx, combo, cost, ev):
-                size = len(combo)
-
-                if size >= min_size:
-                    full_combo = tuple(forced) + tuple(combo)
-                    total_ev = forced_ev + ev
-                    evaluated.append((total_ev, full_combo))
-                    cur_nth = nth_best()
-                    if total_ev > cur_nth:
-                        if len(results) < n:
-                            results.append((total_ev, full_combo))
-                            if len(results) == n:
-                                results.sort(key=lambda x: -x[0])
-                        else:
-                            results[-1] = (total_ev, full_combo)
-                            results.sort(key=lambda x: -x[0])
-
-                if size == max_size:
-                    return
-
-                remaining = nc - idx
-                min_more  = max(0, min_size - size)
-                max_slots = max_size - size
-
-                if remaining < min_more:
-                    return
-
-                ev_ub = ev + ev_suffix[idx] - ev_suffix[min(idx + max_slots, nc)]
-                if forced_ev + ev_ub <= cutoff():
-                    return
-
-                for i in range(idx, nc):
-                    if nc - i - 1 < max(0, min_size - size - 1):
-                        break
-
-                    new_cost = cost + costs_arr[i]
-                    if self.lineup_size is None and new_cost > self.token_cap:
-                        continue
-
-                    slots_after = max_slots - 1
-                    ev_ub_i = ev + evs_arr[i] + ev_suffix[i + 1] - ev_suffix[min(i + 1 + slots_after, nc)]
-                    if forced_ev + ev_ub_i <= cutoff():
-                        continue
-
-                    combo.append(candidates[i])
-                    search(i + 1, combo, new_cost, ev + evs_arr[i])
-                    combo.pop()
-
-            search(0, [], forced_cost, 0.0)
-            results.sort(key=lambda x: -x[0])
-            return results, evaluated
-
-        # Pass 1: find optimal EV
-        results, evaluated = run_search(-1.0)
-
-        # Pass 2: if ev_floor set, re-run keeping all lineups within floor of optimal
-        if self.ev_floor > 0 and results:
-            optimal_ev = results[0][0]
-            floor = optimal_ev - self.ev_floor
-            _, evaluated = run_search(floor, collect_all=True)
-            results = [(ev, combo) for ev, combo in evaluated if ev >= floor]
-            results.sort(key=lambda x: -x[0])
-        results.sort(key=lambda x: -x[0])
-        evaluated.sort(key=lambda x: x[0])
-
-        evs_only = [e for e, _ in evaluated]
-        ne = len(evs_only)
-        buckets = {}
-        for ev in evs_only:
-            b = round(ev * 2) / 2
-            buckets[b] = buckets.get(b, 0) + 1
+        ne = ev_histogram["n"]
+        pct_vals = ev_histogram["percentiles"]
+        buckets = ev_histogram["buckets"]
         pct = [10, 25, 50, 75, 90]
-        pct_vals = {p: evs_only[min(int(p / 100 * ne), ne - 1)] for p in pct}
         print(f"[optimizer] {ne:,} lineups evaluated  "
-              f"min={evs_only[0]:.2f}  "
+              f"min={ev_histogram['min']:.2f}  "
               + "  ".join(f"P{p}={pct_vals[p]:.2f}" for p in pct)
-              + f"  max={evs_only[-1]:.2f}", flush=True)
+              + f"  max={ev_histogram['max']:.2f}", flush=True)
         print("[optimizer] EV distribution:")
-        max_count = max(buckets.values())
+        max_count = max(buckets.values()) if buckets else 1
         for b in sorted(buckets):
             bar = "█" * int(buckets[b] / max_count * 40)
             print(f"  {b:5.1f}  {bar}  {buckets[b]}")
-
-        return results[:n], evaluated
+        return top_lineups, evaluated
 
     def _print_sim_comparison(self, lineups, sim_scores, player_evs, labels=None):
         """Compare analytical EV/stddev vs simulated mean/stddev for each lineup."""
