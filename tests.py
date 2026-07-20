@@ -42,7 +42,7 @@ def _load_wimbledon(costs=False):
     with contextlib.redirect_stdout(io.StringIO()):
         return load_data(
             draw_path=str(REPO_ROOT / "examples/wimbledon_2026_draw.csv"),
-            costs_path=str(REPO_ROOT / "wimbledon_2026_costs.csv") if costs else None,
+            costs_path=str(REPO_ROOT / "examples/wimbledon_2026_costs.csv") if costs else None,
             elo_path=None,
             men_path=str(REPO_ROOT / "atp_elo.csv"),
             women_path=str(REPO_ROOT / "wta_elo.csv"),
@@ -411,14 +411,14 @@ class TestDataLoader(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             d = load_data(
                 draw_path=str(REPO_ROOT / "examples/worldcup2026_bracket.csv"),
-                costs_path=str(REPO_ROOT / "worldcup_costs.csv"),
+                costs_path=str(REPO_ROOT / "examples/worldcup_costs.csv"),
                 elo_path=str(REPO_ROOT / "examples/worldcup2026_elo.csv"),
                 men_path=None, women_path=None, elo_col="elo",
             )
         model = ScoringModel.from_final_rounds(3)
         evs = _compute_all_evs(d, model)
         with contextlib.redirect_stdout(io.StringIO()):
-            lineups = load_preset_lineups(str(REPO_ROOT / "lineups.txt"), d, evs)
+            lineups = load_preset_lineups(str(REPO_ROOT / "examples/lineups.txt"), d, evs)
         self.assertGreater(len(lineups), 0)
         # Sorted descending by EV
         evs_only = [ev for ev, _ in lineups]
@@ -509,7 +509,7 @@ class TestOptimizer(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             cls.data = load_data(
                 draw_path=str(REPO_ROOT / "examples/worldcup2026_bracket.csv"),
-                costs_path=str(REPO_ROOT / "worldcup_costs.csv"),
+                costs_path=str(REPO_ROOT / "examples/worldcup_costs.csv"),
                 elo_path=str(REPO_ROOT / "examples/worldcup2026_elo.csv"),
                 men_path=None, women_path=None, elo_col="elo",
             )
@@ -657,12 +657,12 @@ class TestSimulator(unittest.TestCase):
 
 WIMBLEDON_FLAGS = [
     "-b", "examples/wimbledon_2026_draw.csv",
-    "-p", "wimbledon_2026_costs.csv",
+    "-p", "examples/wimbledon_2026_costs.csv",
     "--ev-floor", "0",
 ]
 WORLDCUP_FLAGS = [
     "-b", "examples/worldcup2026_bracket.csv",
-    "-p", "worldcup_costs.csv",
+    "-p", "examples/worldcup_costs.csv",
     "-e", "examples/worldcup2026_elo.csv",
 ]
 
@@ -835,7 +835,7 @@ class TestCLIIntegration(unittest.TestCase):
     def test_french_clay(self):
         r = self._run(
             "-b", "examples/french_2026_draw.csv",
-            "-p", "french2026_costs.csv",
+            "-p", "examples/french2026_costs.csv",
             "-e", "examples/french_clay_men.csv",
             "--clay",
         )
@@ -858,14 +858,14 @@ class TestCLIIntegration(unittest.TestCase):
     # --- Preset lineups ---
 
     def test_preset_lineups(self):
-        r = self._run(*WORLDCUP_FLAGS, "--lineups", "lineups.txt")
+        r = self._run(*WORLDCUP_FLAGS, "--lineups", "examples/lineups.txt")
         self.assertEqual(r.returncode, 0)
         self.assertIn("LINEUP", r.stdout)
 
     # --- Error cases ---
 
     def test_missing_draw_flag(self):
-        r = self._run("-p", "wimbledon_2026_costs.csv")
+        r = self._run("-p", "examples/wimbledon_2026_costs.csv")
         self.assertNotEqual(r.returncode, 0)
 
 

@@ -1,0 +1,4 @@
+Morocco, Germany, Japan, Norway, Colombia, England
+Bosnia, Ecuador, Japan, Sweden, Norway, Colombia, England, Croatia
+Bosnia, Morocco, Paraguay, Ecuador, Sweden, Norway, Colombia, Croatia
+Bosnia, Paraguay, Ecuador, Japan, Norway, Colombia, Croatia

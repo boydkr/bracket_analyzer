@@ -123,14 +123,18 @@ def _compute_player_evs(data, advancements, config):
 
 def _find_and_print_lineups(data, player_evs, n, config):
     """Run optimizer, print EV histogram, return (top_lineups, evaluated)."""
-    top_lineups, evaluated, ev_histogram = _find_top_lineups_fn(
-        data, player_evs, n,
-        excluded=config.excluded,
-        included=config.included,
-        token_cap=config.token_cap,
-        lineup_size=config.lineup_size,
-        ev_floor=config.ev_floor,
-    )
+    try:
+        top_lineups, evaluated, ev_histogram = _find_top_lineups_fn(
+            data, player_evs, n,
+            excluded=config.excluded,
+            included=config.included,
+            token_cap=config.token_cap,
+            lineup_size=config.lineup_size,
+            ev_floor=config.ev_floor,
+        )
+    except RuntimeError as exc:
+        print(f"ERROR: {exc}")
+        raise SystemExit(1)
     ne = ev_histogram["n"]
     pct_vals = ev_histogram["percentiles"]
     buckets = ev_histogram["buckets"]
@@ -225,7 +229,7 @@ def run_best_at_optimization(data, player_evs, evaluated, title, note, config,
     pool_rank = {idx: n + 1 for n, idx in enumerate(
         sorted(range(len(pool)), key=lambda i: pool[i][0], reverse=True))}
 
-    if preset_lineups is not None:
+    if preset_lineups:
         unique_idxs = sorted(range(len(pool)), key=lambda i: pool_rank[i])
     else:
         unique_idxs = list(dict.fromkeys(

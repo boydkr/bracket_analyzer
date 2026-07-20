@@ -117,6 +117,30 @@ def find_top_lineups(data, player_evs, n, excluded, included, token_cap, lineup_
         min_size = 1
         max_size = nc + forced_slots
 
+    # Abort early when search space is combinatorially intractable.
+    # Only triggers when: all costs are 1 (no real costs file) AND no fixed lineup_size.
+    # In that case the token cap can accommodate up to token_cap players, EV pruning has no
+    # fixed target to cut toward, and the DFS degenerates to near-full enumeration.
+    # With real costs, token-cap + EV pruning make even large draws fast in practice.
+    # With a fixed --size, EV pruning converges quickly regardless of pool size.
+    _all_unit_cost = all(c == 1 for c in costs_arr) if costs_arr else True
+    if _all_unit_cost and lineup_size is None and nc > 50:
+        _COMBO_LIMIT = 5_000_000
+        _effective_max_k = min(max_size, token_cap) if lineup_size is None else max_size
+        _combo_estimate = 0
+        _c = 1
+        for _k in range(1, _effective_max_k + 1):
+            _c = _c * (nc - _k + 1) // _k
+            _combo_estimate += _c
+            if _combo_estimate > _COMBO_LIMIT:
+                break
+        if _combo_estimate > _COMBO_LIMIT:
+            raise RuntimeError(
+                f"Optimizer search space too large: ~{_combo_estimate:,}+ combinations "
+                f"({nc} candidates, token cap {token_cap}). "
+                f"Add a costs file (-p) to price the field and constrain lineup selection."
+            )
+
     def run_search(prune_floor, collect_all=False):
         results = []
         evaluated = []

@@ -126,11 +126,11 @@ After any change, verify against these three baselines:
 ```bash
 # Main lineup optimizer (men + women, grass Elo)
 python3 bracket_analyzer.py -b examples/wimbledon_2026_draw.csv \
-  -p wimbledon_2026_costs.csv -m atp_elo.csv -w wta_elo.csv --grass
+  -p examples/wimbledon_2026_costs.csv -m atp_elo.csv -w wta_elo.csv --grass
 
 # Single-gender no-costs draw
 python3 bracket_analyzer.py -b examples/worldcup2026_bracket.csv \
-  -p worldcup_costs.csv -e examples/worldcup2026_elo.csv
+  -p examples/worldcup_costs.csv -e examples/worldcup2026_elo.csv
 
 # Path analysis
 python3 bracket_analyzer.py -b examples/wimbledon_2026_draw.csv \
