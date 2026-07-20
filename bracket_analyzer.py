@@ -14,6 +14,15 @@ from elo_math import calculate_match_win_prob
 from elo_fetcher import update_elo_files
 from formatting import pct as _pct, fmt_player as _fmt_player, fixed_table as _fixed_table
 from data_loader import BracketData, load_data as _load_data, load_preset_lineups as _load_preset_lineups
+from bracket import (
+    label_to_round as _label_to_round_fn,
+    round_label as _round_label_fn,
+    bracket_opponent_lines as _bracket_opponent_lines_fn,
+    section_win_probs as _section_win_probs_fn,
+    expected_win_prob as _expected_win_prob_fn,
+    compute_ev as _compute_ev_fn,
+    compute_draw_efficiency as _compute_draw_efficiency_fn,
+)
 
 
 
@@ -69,30 +78,10 @@ class ComprehensiveFantasyOptimizer:
         self._data = None  # BracketData, set by load_data()
 
     def _label_to_round(self, label, max_rounds):
-        """Convert a round label to the last forced-win round index (1-based).
-        "QF" means the player is guaranteed to *reach* the QF — forced to win all rounds before it."""
-        label = label.upper()
-        if label in ("W", "WIN", "WINNER"):
-            return max_rounds              # forced to win every round including the Final
-        if label == "F":
-            return max(1, max_rounds - 1)  # forced through SF, guaranteed to reach Final
-        if label == "SF":
-            return max(1, max_rounds - 2)  # forced through QF, guaranteed to reach SF
-        if label == "QF":
-            return max(1, max_rounds - 3)  # forced through R16, guaranteed to reach QF
-        if label.startswith("R") and label[1:].isdigit():
-            size = int(label[1:])
-            return max_rounds - int(math.log2(size))  # forced through prior round, guaranteed to reach Rn
-        raise ValueError(f"Unknown round label '{label}'. Use R128/R64/R32/R16/QF/SF/F/W.")
+        return _label_to_round_fn(label, max_rounds)
 
     def _round_label(self, rnd, max_rounds):
-        """Label for the rnd-th match played in a max_rounds-round draw.
-        rnd=1 is the first match (R128 in a 128-draw), rnd=max_rounds is the Final."""
-        rounds_remaining_before = max_rounds - rnd + 1  # rounds left including this one
-        if rounds_remaining_before == 1: return "F"
-        if rounds_remaining_before == 2: return "SF"
-        if rounds_remaining_before == 3: return "QF"
-        return f"R{2**rounds_remaining_before}"
+        return _round_label_fn(rnd, max_rounds)
 
     def _max_rounds(self, gender):
         return self._data.gender_max_rounds.get(gender, 7)
@@ -117,200 +106,20 @@ class ComprehensiveFantasyOptimizer:
         return calculate_match_win_prob(elo_a, elo_b, bo5=self.bo5, gender=gender)
 
     def _bracket_opponent_lines(self, line, size=128):
-        """Return max_rounds opponent sections for a draw of the given size.
-        Section i (0-indexed) is the block of lines that could face `line` in round i+1."""
-        def block(ln, s):
-            return ((ln - 1) // s) * s + 1
-
-        def sibling(ln, s):
-            my_start = block(ln, s)
-            parent_start = block(ln, s * 2)
-            return (parent_start + s) if my_start == parent_start else parent_start
-
-        sections = []
-        s = 1
-        while s <= size // 2:
-            sib = sibling(line, s)
-            sections.append([sib] if s == 1 else list(range(sib, sib + s)))
-            s *= 2
-        return tuple(sections)
+        return _bracket_opponent_lines_fn(line, size)
 
     def _section_win_probs(self, lines, gender, first_round=1):
-        """Return {line: P(that player wins the section)} for all known players
-        in `lines`, using recursive bracket simulation.  The section must be a
-        power-of-two-sized contiguous block; unknown lines are ignored.
-        first_round is the 1-based round number of the first match in this section."""
-        key = (gender, lines[0], lines[-1], first_round)
-        if key in self._section_cache:
-            return self._section_cache[key]
-        known = [l for l in lines if (gender, l) in self._line_index]
-        if not known:
-            self._section_cache[key] = {}
-            return {}
-        if len(lines) == 1:
-            result = {lines[0]: 1.0} if known else {}
-            self._section_cache[key] = result
-            return result
-        if len(lines) == 2:
-            a, b = lines[0], lines[1]
-            a_known = (gender, a) in self._line_index
-            b_known = (gender, b) in self._line_index
-            if a_known and b_known:
-                adv_a = self.advancements.get(self._line_to_name.get((gender, a)))
-                adv_b = self.advancements.get(self._line_to_name.get((gender, b)))
-                force_a = adv_a is not None and first_round <= adv_a
-                force_b = adv_b is not None and first_round <= adv_b
-                if force_a and not force_b:
-                    result = {a: 1.0, b: 0.0}
-                elif force_b and not force_a:
-                    result = {a: 0.0, b: 1.0}
-                else:
-                    elo_a = self._line_index[(gender, a)]["elo"]
-                    elo_b = self._line_index[(gender, b)]["elo"]
-                    p = self._win_prob(elo_a, elo_b, gender)
-                    result = {a: p, b: 1 - p}
-            elif a_known:
-                result = {a: 1.0}
-            else:
-                result = {b: 1.0}
-            self._section_cache[key] = result
-            return result
-
-        mid = len(lines) // 2
-        left, right = lines[:mid], lines[mid:]
-        section_rounds = int(math.log2(len(lines)))
-        left_probs  = self._section_win_probs(left, gender, first_round)
-        right_probs = self._section_win_probs(right, gender, first_round)
-        cross_round = first_round + section_rounds - 1
-
-        result = {}
-        for l, p_l in left_probs.items():
-            elo_l = self._line_index[(gender, l)]["elo"]
-            adv_l = self.advancements.get(self._line_to_name.get((gender, l)))
-            force_l = adv_l is not None and cross_round <= adv_l
-            for r, p_r in right_probs.items():
-                elo_r = self._line_index[(gender, r)]["elo"]
-                adv_r = self.advancements.get(self._line_to_name.get((gender, r)))
-                force_r = adv_r is not None and cross_round <= adv_r
-                if force_l and not force_r:
-                    p_lr = 1.0
-                elif force_r and not force_l:
-                    p_lr = 0.0
-                else:
-                    p_lr = self._win_prob(elo_l, elo_r, gender)
-                result[l] = result.get(l, 0) + p_l * p_r * p_lr
-                result[r] = result.get(r, 0) + p_l * p_r * (1 - p_lr)
-        self._section_cache[key] = result
-        return result
+        return _section_win_probs_fn(self._data, lines, gender, self.advancements, self.bo5, first_round)
 
     def _expected_win_prob(self, player_elo, lines, gender, fallback_elo, first_round=1, facing_round=None):
-        """Σ P(j wins section) × P(player beats j).
-        facing_round is the round at which the player actually meets the section winner;
-        if an opponent has a forced advance covering that round, win prob against them is 0."""
-        if facing_round is None:
-            facing_round = first_round
-        probs = self._section_win_probs(lines, gender, first_round)
-        if not probs:
-            return self._win_prob(player_elo, fallback_elo, gender)
-        total = 0.0
-        for j, p_j in probs.items():
-            adv_j = self.advancements.get(self._line_to_name.get((gender, j)))
-            if adv_j is not None and facing_round <= adv_j:
-                p_win = 0.0
-            else:
-                p_win = self._win_prob(player_elo, self._line_index[(gender, j)]["elo"], gender)
-            total += p_j * p_win
-        return total
+        return _expected_win_prob_fn(self._data, player_elo, lines, gender, self.advancements,
+                                     self.bo5, fallback_elo, first_round, facing_round)
 
     def compute_ev(self, player_name):
-        """Simulate a player's path through the bracket using actual draw opponents
-        where available, falling back to generic tier Elos otherwise."""
-        p_data = self.players[player_name]
-        gender = p_data["gender"]
-        p_elo = p_data["elo"]
-        line = p_data["line"]
-        quad = p_data["quadrant"]
-        max_rounds = self._max_rounds(gender)
-        size = 2 ** max_rounds
-
-        # Generic fallbacks interpolated from early-round to late-round Elo
-        fb_starts = {1: 1500.0, 2: 1520.0, 3: 1510.0, 4: 1530.0}
-        fb_end = 1950.0
-        start = fb_starts[quad]
-        if max_rounds == 1:
-            fb = [fb_end]
-        else:
-            fb = [start + (fb_end - start) * i / (max_rounds - 1) for i in range(max_rounds)]
-
-        opp_sections = self._bracket_opponent_lines(line, size)
-        ewp = self._expected_win_prob
-        p_reach = 1.0
-        all_p = []
-        advance_through = self.advancements.get(player_name)
-        for i, opp_lines in enumerate(opp_sections):
-            rnd = i + 1  # 1-based
-            if advance_through is not None and rnd <= advance_through:
-                win_p = 1.0
-            else:
-                win_p = ewp(p_elo, opp_lines, gender, fb[i], first_round=1, facing_round=rnd)
-            p_reach = p_reach * win_p
-            all_p.append(round(p_reach, 4))
-
-        min_idx = max(0, max_rounds - self.scoring_rounds - 1)
-        ev = round(2 * sum(all_p[min_idx:]), 3)
-        return {
-            "p_qf": all_p[-4] if len(all_p) >= 4 else all_p[0],
-            "p_sf": all_p[-3] if len(all_p) >= 3 else all_p[0],
-            "p_f":  all_p[-2] if len(all_p) >= 2 else all_p[0],
-            "p_ch": all_p[-1],
-            "ev":        ev,
-            "all_probs": all_p,
-        }
+        return _compute_ev_fn(self._data, player_name, self.advancements, self.bo5, self.scoring_rounds)
 
     def compute_draw_efficiency(self, player_name, player_evs):
-        """EV / neutral_EV. > 1.0 = favorable draw, < 1.0 = tough draw.
-        neutral_EV uses the field-average opponent Elo at each round, weighted
-        by each other player's probability of surviving to that round."""
-        p_data = self.players[player_name]
-        gender = p_data["gender"]
-        p_elo = p_data["elo"]
-        max_rounds = self._max_rounds(gender)
-
-        real_others = [
-            n for n, pd in self.players.items()
-            if pd["gender"] == gender
-            and not n.startswith("__BYE_")
-            and n != player_name
-            and pd["elo"] > 0
-        ]
-
-        p_reach = 1.0
-        neutral_all_p = []
-        for r in range(1, max_rounds + 1):
-            weights, elos = [], []
-            for j in real_others:
-                if j not in player_evs:
-                    continue
-                j_probs = player_evs[j]["all_probs"]
-                p_j_here = 1.0 if r == 1 else j_probs[r - 2]
-                if p_j_here > 0:
-                    weights.append(p_j_here)
-                    elos.append(self.players[j]["elo"])
-            if weights:
-                total_w = sum(weights)
-                neutral_opp_elo = sum(w * e for w, e in zip(weights, elos)) / total_w
-                win_p = self._win_prob(p_elo, neutral_opp_elo, gender)
-            else:
-                win_p = 0.5
-            p_reach *= win_p
-            neutral_all_p.append(p_reach)
-
-        min_idx = max(0, max_rounds - self.scoring_rounds - 1)
-        neutral_ev = 2 * sum(neutral_all_p[min_idx:])
-        actual_ev = player_evs[player_name]["ev"]
-        if neutral_ev == 0:
-            return None, None
-        return actual_ev / neutral_ev, neutral_ev
+        return _compute_draw_efficiency_fn(self._data, player_name, player_evs, self.scoring_rounds, self.bo5)
 
     def _meeting_block_size(self, name_a, name_b):
         """Smallest power-of-2 block containing both players' lines (same gender only)."""
