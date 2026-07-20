@@ -10,31 +10,7 @@ from name_matching import (
     _fuzzy_matches,
     _resolve_player,
 )
-
-
-def _generate_elo_bo5_lookup(max_diff=1000):
-    lookup = [0] * (max_diff + 1)
-    for diff in range(max_diff + 1):
-        p_bo3 = 1.0 / (1.0 + 10 ** ((-diff) / 400.0))
-        low, high = 0.0, 1.0
-        for _ in range(35):
-            p = (low + high) / 2.0
-            if (3 * p**2 - 2 * p**3) < p_bo3:
-                low = p
-            else:
-                high = p
-        p_bo5 = 10 * p**3 - 15 * p**4 + 6 * p**5
-        if p_bo5 >= 1.0:
-            adjusted_diff = max_diff * 1.5
-        elif p_bo5 <= 0.0:
-            adjusted_diff = 0
-        else:
-            adjusted_diff = -400 * math.log10(1.0 / p_bo5 - 1.0)
-        lookup[diff] = round(adjusted_diff)
-    return lookup
-
-_MAX_ELO_DIFF = 1000
-_ELO_BO5_LOOKUP = _generate_elo_bo5_lookup(_MAX_ELO_DIFF)
+from elo_math import calculate_match_win_prob
 
 
 
@@ -304,19 +280,8 @@ class ComprehensiveFantasyOptimizer:
         }
         self._section_cache = {}
 
-    def calculate_match_win_prob(self, elo_a, elo_b, gender=None):
-        if elo_b == 0.0:
-            return 1.0
-        if elo_a == 0.0:
-            return 0.0
-        if self.bo5 and gender == "M":
-            raw_diff = elo_a - elo_b
-            abs_diff = min(abs(round(raw_diff)), _MAX_ELO_DIFF)
-            adjusted_diff = _ELO_BO5_LOOKUP[abs_diff]
-            if raw_diff < 0:
-                adjusted_diff = -adjusted_diff
-            return 1.0 / (1.0 + 10 ** (-adjusted_diff / 400.0))
-        return 1 / (1 + math.pow(10, (elo_b - elo_a) / 400))
+    def _win_prob(self, elo_a, elo_b, gender=None):
+        return calculate_match_win_prob(elo_a, elo_b, bo5=self.bo5, gender=gender)
 
     def _bracket_opponent_lines(self, line, size=128):
         """Return max_rounds opponent sections for a draw of the given size.
@@ -369,7 +334,7 @@ class ComprehensiveFantasyOptimizer:
                 else:
                     elo_a = self._line_index[(gender, a)]["elo"]
                     elo_b = self._line_index[(gender, b)]["elo"]
-                    p = self.calculate_match_win_prob(elo_a, elo_b, gender)
+                    p = self._win_prob(elo_a, elo_b, gender)
                     result = {a: p, b: 1 - p}
             elif a_known:
                 result = {a: 1.0}
@@ -399,7 +364,7 @@ class ComprehensiveFantasyOptimizer:
                 elif force_r and not force_l:
                     p_lr = 0.0
                 else:
-                    p_lr = self.calculate_match_win_prob(elo_l, elo_r, gender)
+                    p_lr = self._win_prob(elo_l, elo_r, gender)
                 result[l] = result.get(l, 0) + p_l * p_r * p_lr
                 result[r] = result.get(r, 0) + p_l * p_r * (1 - p_lr)
         self._section_cache[key] = result
@@ -413,14 +378,14 @@ class ComprehensiveFantasyOptimizer:
             facing_round = first_round
         probs = self._section_win_probs(lines, gender, first_round)
         if not probs:
-            return self.calculate_match_win_prob(player_elo, fallback_elo, gender)
+            return self._win_prob(player_elo, fallback_elo, gender)
         total = 0.0
         for j, p_j in probs.items():
             adv_j = self.advancements.get(self._line_to_name.get((gender, j)))
             if adv_j is not None and facing_round <= adv_j:
                 p_win = 0.0
             else:
-                p_win = self.calculate_match_win_prob(player_elo, self._line_index[(gender, j)]["elo"], gender)
+                p_win = self._win_prob(player_elo, self._line_index[(gender, j)]["elo"], gender)
             total += p_j * p_win
         return total
 
@@ -501,7 +466,7 @@ class ComprehensiveFantasyOptimizer:
             if weights:
                 total_w = sum(weights)
                 neutral_opp_elo = sum(w * e for w, e in zip(weights, elos)) / total_w
-                win_p = self.calculate_match_win_prob(p_elo, neutral_opp_elo, gender)
+                win_p = self._win_prob(p_elo, neutral_opp_elo, gender)
             else:
                 win_p = 0.5
             p_reach *= win_p
@@ -726,7 +691,7 @@ class ComprehensiveFantasyOptimizer:
                     if na in rounds_won:
                         rounds_won[na] += 1
                 else:
-                    p = self.calculate_match_win_prob(elo_a, elo_b, gender)
+                    p = self._win_prob(elo_a, elo_b, gender)
                     if rng.random() < p:
                         winner_line, winner, loser, p_win = la, na, nb, p
                     else:
@@ -1523,7 +1488,7 @@ class ComprehensiveFantasyOptimizer:
                         if adv_j is not None and rnd <= adv_j:
                             pw = 0.0
                         else:
-                            pw = self.calculate_match_win_prob(p_elo, self._line_index[(gender, j)]["elo"], gender)
+                            pw = self._win_prob(p_elo, self._line_index[(gender, j)]["elo"], gender)
                         win_p_parts.append(p_j * pw)
                     win_p = sum(win_p_parts)
                     opp_parts = []
@@ -1534,7 +1499,7 @@ class ComprehensiveFantasyOptimizer:
                     opp_str = " / ".join(opp_parts)
                 else:
                     is_bye = False
-                    win_p = self.calculate_match_win_prob(p_elo, fallback, gender)
+                    win_p = self._win_prob(p_elo, fallback, gender)
                     opp_str = f"unknown (fallback {elo_label} {round(fallback)})"
 
             p_reach_next = p_reach * win_p
