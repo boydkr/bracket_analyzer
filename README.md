@@ -46,6 +46,26 @@ France,8,M
 
 Lines are 1-indexed. Players in the same half of the bracket can only meet in the Final. Unoccupied lines become BYEs automatically.
 
+### Results (`-r`)
+
+Completed match results — one row per match. The round is inferred automatically from the draw structure; you only need winner and loser names.
+
+```
+winner,loser
+Jannik Sinner,Miomir Kecmanovic
+Carlos Alcaraz,Francisco Cerundolo
+Aryna Sabalenka,Elina Svitolina
+```
+
+| Column | Required | Notes |
+|--------|----------|-------|
+| `winner` | yes | Name fuzzy-matched against the draw |
+| `loser` | yes | Name fuzzy-matched against the draw |
+
+Each match result advances the winner through that round and sets the loser's path correctly up to the round they lost — their earlier-round opponents remain in the model. Providing the full set of completed matches for a given round gives the most accurate forward-looking EV.
+
+A warning is printed if a player appears as both winner and loser, or if a player is listed winning a round they were already recorded losing.
+
 ### Elo (`-e` / `-m` / `-w`)
 
 Ratings file — one row per player. Use `-e` for a single gender-neutral file, or `-m`/`-w` for separate men's/women's files. The default ATP/WTA files (`atp_elo.csv` / `wta_elo.csv`) are fetched from tennisabstract.com via `--update-elo`.
@@ -76,10 +96,12 @@ Players in the costs/draw files with no Elo match default to **1650**. A warning
 -e <file>               Gender-neutral Elo CSV
 -m <file>               Men's Elo CSV (default: atp_elo.csv)
 -w <file>               Women's Elo CSV (default: wta_elo.csv)
+-r <file>               Match results CSV (winner,loser columns; see below)
 
 --grass / --clay / --hard   Use surface-specific Elo column (warns + auto-falls back if absent)
 --scoring-rounds N      Score for reaching the final N rounds + winning (default: 3 = QF/SF/F + W)
 
+--results W,L;W,L,...   Inline match results (alternative to -r for a few matches)
 --path PLAYER           Show bracket path analysis for one player
 --top N                 Show top N lineups by EV (default: 1)
 --ev-floor N            Also show all lineups within N EV of optimal (e.g. --ev-floor 1.0)
@@ -147,6 +169,17 @@ Percentages use up to 3 significant characters: `.04` for < 1%, `8.2` for < 10%,
 **Evaluate preset lineups:**
 ```bash
 ./bracket_analyzer.py -b draw.csv -e elo.csv --lineups my_lineups.txt --simulate 10000
+```
+
+**Live tournament results (from a CSV):**
+```bash
+./bracket_analyzer.py -b draw.csv -p costs.csv -m atp_elo.csv -w wta_elo.csv -r r1_results.csv
+```
+
+**Inline results for a few matches:**
+```bash
+./bracket_analyzer.py -b draw.csv -p costs.csv -m atp_elo.csv \
+  --results "Jannik Sinner,Miomir Kecmanovic;Carlos Alcaraz,Francisco Cerundolo"
 ```
 
 **Update default Elo files:**

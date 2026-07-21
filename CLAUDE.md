@@ -17,6 +17,12 @@ python3 bracket_analyzer.py -b draw.csv -p costs.csv --path "Jannik Sinner"
 # Monte Carlo simulation
 python3 bracket_analyzer.py -b draw.csv -p costs.csv --simulate 10000 --best-at
 
+# Live tournament results — winner,loser CSV (round inferred from draw structure)
+python3 bracket_analyzer.py -b draw.csv -p costs.csv -r results.csv
+
+# Inline results shorthand
+python3 bracket_analyzer.py -b draw.csv -p costs.csv --results "Sinner,Kecmanovic;Alcaraz,Cerundolo"
+
 # Update Elo ratings from tennisabstract.com
 python3 bracket_analyzer.py --update-elo
 
@@ -25,6 +31,16 @@ python3 bracket_analyzer.py -b draw.csv -p costs.csv --markdown
 ```
 
 No build step, no dependencies beyond the Python standard library. Use `python3`.
+
+## Running tests
+
+Tests live in `tests.py` (single file, stdlib `unittest`). Run with:
+
+```bash
+python3 -m unittest tests
+```
+
+Do **not** use `pytest` or point at a `tests/` directory — neither exists.
 
 ## Module structure
 

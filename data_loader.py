@@ -202,6 +202,20 @@ def load_data(draw_path, costs_path, elo_path, men_path, women_path, elo_col):
     )
 
 
+def load_results(path):
+    """Read a winner,loser CSV. Returns list of (winner_str, loser_str) raw name pairs."""
+    pairs = []
+    with open(path, mode="r", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        headers = {k.lower(): k for k in reader.fieldnames}
+        for row in reader:
+            winner = row[headers["winner"]].strip()
+            loser = row[headers["loser"]].strip()
+            if winner and loser:
+                pairs.append((winner, loser))
+    return pairs
+
+
 def load_preset_lineups(lineups_path, data, player_evs):
     """Read lineups from file (one per line, comma-separated names).
     Returns list of (ev, tuple_of_names) sorted descending by EV."""

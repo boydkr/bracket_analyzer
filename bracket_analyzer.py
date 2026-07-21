@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 
 from name_matching import _resolve_player
 from elo_fetcher import update_elo_files
-from data_loader import load_data as _load_data, load_preset_lineups as _load_preset_lineups
+from data_loader import load_data as _load_data, load_preset_lineups as _load_preset_lineups, load_results as _load_results_fn
 from bracket import (
     label_to_round as _label_to_round_fn,
     bracket_opponent_lines as _bracket_opponent_lines_fn,
@@ -52,6 +52,76 @@ class Config:
 # ---------------------------------------------------------------------------
 # Mutation helpers (clear cache after mutating elo/advancements)
 # ---------------------------------------------------------------------------
+
+def _infer_match_round(data, winner_name, loser_name):
+    """Return the round (1-based) at which winner and loser meet in the draw."""
+    wd = data.players[winner_name]
+    ld = data.players[loser_name]
+    if wd["gender"] != ld["gender"]:
+        raise ValueError(f"{winner_name} and {loser_name} are in different gender draws")
+    size = 2 ** data.gender_max_rounds[wd["gender"]]
+    for rnd, opp_lines in enumerate(_bracket_opponent_lines_fn(wd["line"], size), start=1):
+        if ld["line"] in opp_lines:
+            return rnd
+    raise ValueError(f"{winner_name} (line {wd['line']}) and {loser_name} (line {ld['line']}) cannot meet in this draw")
+
+
+def apply_results(data, match_pairs):
+    """Convert (winner, loser) match pairs into an advancements dict.
+
+    For each match at round rnd:
+      - winner advances through rnd (auto-wins rounds 1..rnd)
+      - loser advances through rnd-1 (their path is correct up to the loss;
+        at rnd the winner is forced, so loser probability becomes 0)
+
+    Returns advancements dict — same type as apply_advancements().
+    """
+    advancements = {}
+    won_at = {}   # {name: highest round they appear as winner}
+    lost_at = {}  # {name: round they appear as loser}
+
+    for winner_raw, loser_raw in match_pairs:
+        try:
+            winner = _resolve_player(winner_raw.strip(), data.players)
+            loser  = _resolve_player(loser_raw.strip(), data.players)
+        except ValueError as e:
+            print(f"WARNING: {e} — skipping result '{winner_raw},{loser_raw}'")
+            continue
+
+        if winner == loser:
+            print(f"WARNING: {winner} listed as both winner and loser — skipping")
+            continue
+
+        try:
+            rnd = _infer_match_round(data, winner, loser)
+        except ValueError as e:
+            print(f"WARNING: {e} — skipping result '{winner_raw},{loser_raw}'")
+            continue
+
+        if winner in lost_at and lost_at[winner] <= rnd:
+            print(f"WARNING: {winner} listed as winner in round {rnd} "
+                  f"but already lost in round {lost_at[winner]}")
+
+        if loser in won_at and won_at[loser] >= rnd:
+            print(f"WARNING: {loser} listed as loser in round {rnd} "
+                  f"but already won through round {won_at[loser]}")
+
+        won_at[winner] = max(won_at.get(winner, 0), rnd)
+        lost_at[loser] = min(lost_at.get(loser, rnd), rnd)
+
+        advancements[winner] = max(advancements.get(winner, 0), rnd)
+        if rnd > 1:
+            advancements[loser] = max(advancements.get(loser, 0), rnd - 1)
+
+        from bracket import round_label as _round_label_fn
+        gender = data.players[winner]["gender"]
+        max_rounds = data.gender_max_rounds[gender]
+        label = _round_label_fn(rnd, max_rounds)
+        print(f"Result: {winner} def. {loser} [{label}]", flush=True)
+
+    data.section_cache.clear()
+    return advancements
+
 
 def apply_advancements(data, advancements_raw):
     """Parse Player:Round strings, resolve names, return {name: round_index} dict."""
@@ -487,6 +557,12 @@ if __name__ == "__main__":
                         help="Adjust win probabilities for best-of-five matches")
     parser.add_argument("--draw-efficiency", dest="draw_efficiency", action="store_true",
                         help="Print draw efficiency table (actual EV / expected EV)")
+    parser.add_argument("-r", "--results-file", dest="results_file", default=None,
+                        metavar="FILE",
+                        help="CSV of completed match results (winner,loser columns)")
+    parser.add_argument("--results", dest="results_raw", default=None,
+                        metavar="W,L;W,L,...",
+                        help="Inline match results, e.g. \"Sinner,Kecmanovic;Alcaraz,Cerundolo\"")
     parser.add_argument("--advancements", dest="advancements_raw", default=None,
                         metavar="PLAYER:ROUND,...",
                         help="Force players through a round, e.g. \"Djokovic:QF,Sinner:F\"")
@@ -512,7 +588,19 @@ if __name__ == "__main__":
     )
 
     advancements = {}
-    if args.advancements_raw:
+    match_pairs = []
+    if args.results_file:
+        match_pairs.extend(_load_results_fn(args.results_file))
+    if args.results_raw:
+        for entry in args.results_raw.split(";"):
+            entry = entry.strip()
+            if not entry:
+                continue
+            winner, _, loser = entry.partition(",")
+            match_pairs.append((winner, loser))
+    if match_pairs:
+        advancements = apply_results(data, match_pairs)
+    elif args.advancements_raw:
         advancements = apply_advancements(data, args.advancements_raw)
 
     if args.boost_raw:
